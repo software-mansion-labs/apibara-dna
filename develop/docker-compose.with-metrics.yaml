@@ -2,10 +2,10 @@ services:
   minio:
     image: minio/minio:latest
     ports:
-    - "9000:9000"
-    - "9001:9001"
+      - "9000:9000"
+      - "9001:9001"
     volumes:
-    - minio_data:/data
+      - minio_data:/data
     environment:
       MINIO_ROOT_USER: "minioadmin"
       MINIO_ROOT_PASSWORD: "minioadmin"
@@ -18,44 +18,55 @@ services:
   etcd:
     image: bitnami/etcd:latest
     environment:
-    - ALLOW_NONE_AUTHENTICATION=yes
-    - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
+      - ALLOW_NONE_AUTHENTICATION=yes
+      - ETCD_ADVERTISE_CLIENT_URLS=http://etcd:2379
     ports:
-    - "2379:2379"
-    - "2380:2380"
+      - "2379:2379"
+      - "2380:2380"
     volumes:
-    - etcd_data:/bitnami/etcd
+      - etcd_data:/bitnami/etcd
 
   opentelemetry-collector:
     image: otel/opentelemetry-collector:latest
     ports:
-    - "4317:4317"
+      - "4317:4317"
     volumes:
-    - ./opentelemetry-collector:/etc/opentelemetry-collector
+      - ./opentelemetry-collector:/etc/opentelemetry-collector
     command:
-    - '--config=/etc/opentelemetry-collector/config.yaml'
+      - "--config=/etc/opentelemetry-collector/config.yaml"
+
+  tempo:
+    image: grafana/tempo:latest
+    volumes:
+      - ./tempo/:/etc/tempo:ro
+    command:
+      - "-config.file=/etc/tempo/tempo.yaml"
+    ports:
+      - 3200:3200
+      - 5317:5317
 
   prometheus:
     image: prom/prometheus:latest
     volumes:
-    - ./prometheus:/etc/prometheus:ro
+      - ./prometheus:/etc/prometheus:ro
     command:
-    - '--config.file=/etc/prometheus/prometheus.yaml'
-    - '--storage.tsdb.path=/prometheus'
-    - '--web.enable-remote-write-receiver'
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.enable-remote-write-receiver"
     ports:
-    - 9090:9090
+      - 9090:9090
+
   grafana:
     image: grafana/grafana:latest
     ports:
-    - 3000:3000
+      - 3000:3000
     volumes:
-    - grafana_data:/var/lib/grafana
-    - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - grafana_data:/var/lib/grafana
+      - ./grafana/datasources.yaml:/etc/grafana/provisioning/datasources/provisioning-datasources.yaml:ro
     environment:
-    - GF_SECURITY_ADMIN_USER=admin
-    - GF_SECURITY_ADMIN_PASSWORD=admin
-    - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
 
 volumes:
   minio_data:

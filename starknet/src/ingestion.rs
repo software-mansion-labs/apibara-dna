@@ -10,10 +10,9 @@ use apibara_dna_common::{
     Cursor, Hash,
 };
 use apibara_dna_protocol::starknet;
-use error_stack::{Result, ResultExt};
+use error_stack::{Report, Result, ResultExt};
 use prost::Message;
-use tokio::sync::Mutex;
-use tracing::trace;
+use tracing::Instrument;
 
 use crate::{
     filter::{ContractChangeType, TransactionType},
@@ -30,7 +29,7 @@ use crate::{
         RECEIPT_FRAGMENT_NAME, STORAGE_DIFF_FRAGMENT_ID, STORAGE_DIFF_FRAGMENT_NAME,
         TRACE_FRAGMENT_ID, TRACE_FRAGMENT_NAME, TRANSACTION_FRAGMENT_ID, TRANSACTION_FRAGMENT_NAME,
     },
-    proto::{convert_block_header, ModelExt},
+    proto::{convert_block_header, convert_pre_confirmed_block_header, ModelExt},
     provider::{models, BlockExt, BlockId, StarknetProvider, StarknetProviderErrorExt},
 };
 
@@ -42,18 +41,12 @@ pub struct StarknetBlockIngestionOptions {
 
 pub struct StarknetBlockIngestion {
     provider: StarknetProvider,
-    finalized_hint: Mutex<Option<u64>>,
     options: StarknetBlockIngestionOptions,
 }
 
 impl StarknetBlockIngestion {
     pub fn new(provider: StarknetProvider, options: StarknetBlockIngestionOptions) -> Self {
-        let finalized_hint = Mutex::new(None);
-        Self {
-            provider,
-            finalized_hint,
-            options,
-        }
+        Self { provider, options }
     }
 }
 
@@ -68,7 +61,7 @@ impl BlockIngestion for StarknetBlockIngestion {
         self.options.ingest_pending
     }
 
-    #[tracing::instrument("starknet_get_head_cursor", skip_all, err(Debug), level = "debug")]
+    #[tracing::instrument("starknet_get_head_cursor", skip_all, err(Debug))]
     async fn get_head_cursor(&self) -> Result<Cursor, IngestionError> {
         let cursor = self
             .provider
@@ -83,59 +76,22 @@ impl BlockIngestion for StarknetBlockIngestion {
         Ok(cursor)
     }
 
-    #[tracing::instrument("starknet_get_finalized_cursor", skip_all, err(Debug), level = "debug")]
+    #[tracing::instrument("starknet_get_finalized_cursor", skip_all, err(Debug))]
     async fn get_finalized_cursor(&self) -> Result<Cursor, IngestionError> {
-        let mut finalized_hint_guard = self.finalized_hint.lock().await;
-
-        let head = self.get_head_cursor().await?;
-
-        let finalized_hint = if let Some(finalized_hint) = finalized_hint_guard.as_ref() {
-            Cursor::new_finalized(*finalized_hint)
-        } else {
-            let mut number = head.number.saturating_sub(50);
-            loop {
-                let block = self
-                    .provider
-                    .get_block_with_tx_hashes(&BlockId::Number(number))
-                    .await
-                    .change_context(IngestionError::RpcRequest)
-                    .attach_printable("failed to get block by number")?;
-
-                if block.is_finalized() {
-                    let cursor = block
-                        .cursor()
-                        .ok_or(IngestionError::RpcRequest)
-                        .attach_printable("missing block cursor")?;
-                    break cursor;
-                }
-
-                let step_size = 200;
-                if number == 0 {
-                    return Ok(Cursor::new_finalized(0));
-                } else if number < step_size {
-                    number = 0;
-                } else {
-                    number -= step_size;
-                }
-            }
-        };
-
-        let finalized = binary_search_finalized_block(&self.provider, finalized_hint, head.number)
+        let cursor = self
+            .provider
+            .get_block_with_tx_hashes(&BlockId::Finalized)
             .await
             .change_context(IngestionError::RpcRequest)
-            .attach_printable("failed to get finalized block")?;
+            .attach_printable("failed to get finalized block")?
+            .cursor()
+            .ok_or(IngestionError::RpcRequest)
+            .attach_printable("missing finalized block cursor")?;
 
-        finalized_hint_guard.replace(finalized.number);
-
-        Ok(finalized)
+        Ok(cursor)
     }
 
-    #[tracing::instrument(
-        "starknet_get_block_info_by_number",
-        skip(self),
-        err(Debug),
-        level = "debug"
-    )]
+    #[tracing::instrument("starknet_get_block_info_by_number", skip(self), err(Debug))]
     async fn get_block_info_by_number(
         &self,
         block_number: u64,
@@ -174,27 +130,123 @@ impl BlockIngestion for StarknetBlockIngestion {
         })
     }
 
-    #[tracing::instrument(
-        "starknet_ingest_pending_block",
-        skip(self),
-        err(Debug),
-        level = "debug"
-    )]
+    #[tracing::instrument("starknet_ingest_pending_block", skip(self), err(Debug))]
     async fn ingest_pending_block(
         &self,
-        _parent: &Cursor,
-        _generation: u64,
+        parent: &Cursor,
+        generation: u64,
     ) -> Result<Option<(PendingBlockInfo, Block)>, IngestionError> {
-        // Pending block ingestion is not supported by the Starknet provider since the parent block hash is not available anymore
-        Ok(None)
+        let block_id = BlockId::Pending;
+
+        let block = match self.provider.get_block_with_receipts(&block_id).await {
+            Ok(block) => block,
+            Err(err) if err.is_not_found() => return Ok(None),
+            Err(err) => {
+                return Err(err)
+                    .change_context(IngestionError::RpcRequest)
+                    .attach_printable("failed to get pre-confirmed block")
+            }
+        };
+
+        let models::MaybePreConfirmedBlockWithReceipts::PreConfirmedBlock(block) = block else {
+            return Err(IngestionError::RpcRequest).attach_printable("unexpected accepted block");
+        };
+
+        if block.block_number != parent.number + 1 {
+            return Ok(None);
+        }
+
+        let state_update = tokio::spawn({
+            let provider = self.provider.clone();
+            let block_id = block_id.clone();
+            async move {
+                provider
+                    .get_state_update(&block_id)
+                    .await
+                    .change_context(IngestionError::RpcRequest)
+            }
+            .in_current_span()
+        });
+
+        let transaction_traces = tokio::spawn({
+            let provider = self.provider.clone();
+            let block_id = block_id.clone();
+            let should_ingest = self.options.ingest_traces;
+            async move {
+                if should_ingest {
+                    provider
+                        .get_block_transaction_traces(&block_id)
+                        .await
+                        .change_context(IngestionError::RpcRequest)
+                } else {
+                    Ok(Vec::default())
+                }
+            }
+            .in_current_span()
+        });
+
+        let models::MaybePreConfirmedStateUpdate::PreConfirmedUpdate(state_update) = state_update
+            .await
+            .change_context(IngestionError::RpcRequest)??
+        else {
+            return Err(IngestionError::RpcRequest)
+                .attach_printable("unexpected accepted state update");
+        };
+
+        let transaction_traces = transaction_traces
+            .await
+            .change_context(IngestionError::RpcRequest)??;
+
+        let number = block.block_number;
+
+        let block_info = PendingBlockInfo {
+            number,
+            generation,
+            parent: parent.hash.clone(),
+        };
+
+        let block = tracing::info_span!("index_block").in_scope(|| {
+            let header_fragment = {
+                let header = convert_pre_confirmed_block_header(&block);
+                HeaderFragment {
+                    data: header.encode_to_vec(),
+                }
+            };
+
+            let body_ingestion_result =
+                collect_block_body_and_index(&block.transactions, &transaction_traces)?;
+
+            let state_update_ingestion_result =
+                collect_state_update_body_and_index(&state_update.state_diff)?;
+
+            let mut body_fragments = body_ingestion_result.body;
+            let mut index_fragments = body_ingestion_result.index;
+            let mut join_fragments = body_ingestion_result.join;
+
+            body_fragments.extend(state_update_ingestion_result.body);
+            index_fragments.extend(state_update_ingestion_result.index);
+            join_fragments.extend(state_update_ingestion_result.join);
+
+            let index_group = IndexGroupFragment {
+                indexes: index_fragments,
+            };
+
+            let join_group = JoinGroupFragment {
+                joins: join_fragments,
+            };
+
+            Ok::<_, Report<IngestionError>>(Block {
+                header: header_fragment,
+                index: index_group,
+                body: body_fragments,
+                join: join_group,
+            })
+        })?;
+
+        Ok((block_info, block).into())
     }
 
-    #[tracing::instrument(
-        "starknet_ingest_block_by_number",
-        skip(self),
-        err(Debug),
-        level = "debug"
-    )]
+    #[tracing::instrument("starknet_ingest_block_by_number", skip(self), err(Debug))]
     async fn ingest_block_by_number(
         &self,
         block_number: u64,
@@ -234,6 +286,7 @@ impl BlockIngestion for StarknetBlockIngestion {
                     .await
                     .change_context(IngestionError::RpcRequest)
             }
+            .in_current_span()
         });
 
         let transaction_traces = tokio::spawn({
@@ -250,6 +303,7 @@ impl BlockIngestion for StarknetBlockIngestion {
                     Ok(Vec::default())
                 }
             }
+            .in_current_span()
         });
 
         let models::MaybePreConfirmedStateUpdate::Update(state_update) = state_update
@@ -274,42 +328,43 @@ impl BlockIngestion for StarknetBlockIngestion {
             hash: Hash(hash),
             parent: Hash(parent),
         };
+        let block = tracing::info_span!("index_block").in_scope(|| {
+            let header_fragment = {
+                let header = convert_block_header(&block);
+                HeaderFragment {
+                    data: header.encode_to_vec(),
+                }
+            };
 
-        let header_fragment = {
-            let header = convert_block_header(&block);
-            HeaderFragment {
-                data: header.encode_to_vec(),
-            }
-        };
+            let body_ingestion_result =
+                collect_block_body_and_index(&block.transactions, &transaction_traces)?;
 
-        let body_ingestion_result =
-            collect_block_body_and_index(&block.transactions, &transaction_traces)?;
+            let state_update_ingestion_result =
+                collect_state_update_body_and_index(&state_update.state_diff)?;
 
-        let state_update_ingestion_result =
-            collect_state_update_body_and_index(&state_update.state_diff)?;
+            let mut body_fragments = body_ingestion_result.body;
+            let mut index_fragments = body_ingestion_result.index;
+            let mut join_fragments = body_ingestion_result.join;
 
-        let mut body_fragments = body_ingestion_result.body;
-        let mut index_fragments = body_ingestion_result.index;
-        let mut join_fragments = body_ingestion_result.join;
+            body_fragments.extend(state_update_ingestion_result.body);
+            index_fragments.extend(state_update_ingestion_result.index);
+            join_fragments.extend(state_update_ingestion_result.join);
 
-        body_fragments.extend(state_update_ingestion_result.body);
-        index_fragments.extend(state_update_ingestion_result.index);
-        join_fragments.extend(state_update_ingestion_result.join);
+            let index_group = IndexGroupFragment {
+                indexes: index_fragments,
+            };
 
-        let index_group = IndexGroupFragment {
-            indexes: index_fragments,
-        };
+            let join_group = JoinGroupFragment {
+                joins: join_fragments,
+            };
 
-        let join_group = JoinGroupFragment {
-            joins: join_fragments,
-        };
-
-        let block = Block {
-            header: header_fragment,
-            index: index_group,
-            body: body_fragments,
-            join: join_group,
-        };
+            Ok::<_, Report<IngestionError>>(Block {
+                header: header_fragment,
+                index: index_group,
+                body: body_fragments,
+                join: join_group,
+            })
+        })?;
 
         Ok((block_info, block))
     }
@@ -319,7 +374,6 @@ impl Clone for StarknetBlockIngestion {
     fn clone(&self) -> Self {
         Self {
             provider: self.provider.clone(),
-            finalized_hint: Mutex::new(None),
             options: self.options.clone(),
         }
     }
@@ -1138,50 +1192,4 @@ fn set_receipt_transaction_index(receipt: &mut starknet::TransactionReceipt, ind
     };
 
     meta.transaction_index = index;
-}
-
-async fn binary_search_finalized_block(
-    provider: &StarknetProvider,
-    existing_finalized: Cursor,
-    head: u64,
-) -> Result<Cursor, IngestionError> {
-    let mut finalized = existing_finalized;
-    let mut head = head;
-    let mut step_count = 0;
-
-    loop {
-        step_count += 1;
-
-        if step_count > 100 {
-            return Err(IngestionError::RpcRequest)
-                .attach_printable("maximum number of iterations reached");
-        }
-
-        let mid_block_number = finalized.number + (head - finalized.number) / 2;
-        trace!(mid_block_number, "binary search iteration");
-
-        if mid_block_number <= finalized.number {
-            trace!(?finalized, "finalized block found");
-            break;
-        }
-
-        let mid_block = provider
-            .get_block_with_tx_hashes(&BlockId::Number(mid_block_number))
-            .await
-            .change_context(IngestionError::RpcRequest)
-            .attach_printable("failed to get block by number")?;
-
-        let mid_cursor = mid_block
-            .cursor()
-            .ok_or(IngestionError::RpcRequest)
-            .attach_printable("missing block cursor")?;
-
-        if mid_block.is_finalized() {
-            finalized = mid_cursor;
-        } else {
-            head = mid_cursor.number;
-        }
-    }
-
-    Ok(finalized)
 }

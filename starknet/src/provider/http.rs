@@ -4,7 +4,7 @@ use backon::{ExponentialBuilder, Retryable};
 use error_stack::{Report, Result, ResultExt};
 use reqwest::header::{HeaderMap, HeaderValue};
 use starknet_rust::providers::{jsonrpc::HttpTransport, JsonRpcClient, Provider};
-use tracing::warn;
+use tracing::{warn, Instrument};
 use url::Url;
 
 use super::models;
@@ -27,6 +27,8 @@ pub enum BlockId {
     Number(u64),
     /// Block by hash.
     Hash(models::FieldElement),
+    /// Finalized block.
+    Finalized,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +78,7 @@ impl StarknetProvider {
         let request = (|| async {
             self.client
                 .get_block_with_tx_hashes(starknet_block_id)
+                .instrument(tracing::info_span!("rpc_get_block_with_tx_hashes"))
                 .await
         })
         .retry(self.options.exponential_backoff)
@@ -100,11 +103,15 @@ impl StarknetProvider {
     ) -> Result<models::MaybePreConfirmedBlockWithReceipts, StarknetProviderError> {
         let starknet_block_id: starknet_rust::core::types::BlockId = block_id.into();
 
-        let request = (|| async { self.client.get_block_with_receipts(starknet_block_id, None).await })
-            .retry(self.options.exponential_backoff)
-            .notify(|err, duration| {
-                warn!(duration = ?duration, error = %err, block_id = ?block_id, "get_block_with_receipts failed");
-            });
+        let request = (|| async {
+            self.client.get_block_with_receipts(starknet_block_id, None)
+                .instrument(tracing::info_span!("rpc_get_block_with_receipts"))
+                .await
+        })
+        .retry(self.options.exponential_backoff)
+        .notify(|err, duration| {
+            warn!(duration = ?duration, error = %err, block_id = ?block_id, "get_block_with_receipts failed");
+        });
         let Ok(response) = tokio::time::timeout(self.options.timeout, request).await else {
             return Err(StarknetProviderError::Timeout)
                 .attach_printable("failed to get block with receipts")
@@ -123,11 +130,15 @@ impl StarknetProvider {
     ) -> Result<models::MaybePreConfirmedStateUpdate, StarknetProviderError> {
         let starknet_block_id: starknet_rust::core::types::BlockId = block_id.into();
 
-        let request = (|| async { self.client.get_state_update(starknet_block_id).await })
-            .retry(self.options.exponential_backoff)
-            .notify(|err, duration| {
-                warn!(duration = ?duration, error = %err, block_id = ?block_id, "get_state_update failed");
-            });
+        let request = (|| async {
+            self.client.get_state_update(starknet_block_id)
+                .instrument(tracing::info_span!("rpc_get_state_update"))
+                .await
+        })
+        .retry(self.options.exponential_backoff)
+        .notify(|err, duration| {
+            warn!(duration = ?duration, error = %err, block_id = ?block_id, "get_state_update failed");
+        });
         let Ok(response) = tokio::time::timeout(self.options.timeout, request).await else {
             return Err(StarknetProviderError::Timeout)
                 .attach_printable("failed to get block state update")
@@ -150,6 +161,7 @@ impl StarknetProvider {
         let request = (|| async {
             self.client
                 .trace_block_transactions(starknet_block_id, None)
+                .instrument(tracing::info_span!("rpc_trace_block_transactions"))
                 .await
         })
         .retry(self.options.exponential_backoff)
@@ -199,6 +211,9 @@ impl From<&BlockId> for starknet_rust::core::types::BlockId {
             ),
             BlockId::Number(number) => starknet_rust::core::types::BlockId::Number(*number),
             BlockId::Hash(hash) => starknet_rust::core::types::BlockId::Hash(*hash),
+            BlockId::Finalized => starknet_rust::core::types::BlockId::Tag(
+                starknet_rust::core::types::BlockTag::L1Accepted,
+            ),
         }
     }
 }
@@ -215,6 +230,7 @@ impl TryFrom<&BlockId> for starknet_rust::core::types::ConfirmedBlockId {
                 *number,
             )),
             BlockId::Hash(hash) => Ok(starknet_rust::core::types::ConfirmedBlockId::Hash(*hash)),
+            BlockId::Finalized => Ok(starknet_rust::core::types::ConfirmedBlockId::L1Accepted),
         }
     }
 }

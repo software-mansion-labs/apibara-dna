@@ -280,6 +280,7 @@ impl BlockStoreWriter {
         Self { client }
     }
 
+    #[tracing::instrument(name = "put_block", skip(self, block), err(Debug))]
     pub async fn put_block(
         &self,
         cursor: &Cursor,
@@ -303,6 +304,7 @@ impl BlockStoreWriter {
         Ok((size, response.etag))
     }
 
+    #[tracing::instrument(name = "put_pending_block", skip(self, block), err(Debug))]
     pub async fn put_pending_block(
         &self,
         block_info: &PendingBlockInfo,
@@ -357,6 +359,7 @@ impl BlockStoreWriter {
         Ok(())
     }
 
+    #[tracing::instrument(name = "put_segment", skip(self, segment), err(Debug))]
     pub async fn put_segment(
         &self,
         first_cursor: &Cursor,
@@ -378,6 +381,7 @@ impl BlockStoreWriter {
         Ok(response.etag)
     }
 
+    #[tracing::instrument(name = "put_group", skip(self, group), err(Debug))]
     pub async fn put_group(
         &self,
         first_cursor: &Cursor,

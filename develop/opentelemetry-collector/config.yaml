@@ -11,6 +11,10 @@ exporters:
   debug:
   prometheusremotewrite:
     endpoint: http://prometheus:9090/api/v1/write
+  otlp/tempo:
+    endpoint: tempo:5317
+    tls:
+      insecure: true
 
 service:
   pipelines:
@@ -21,4 +25,4 @@ service:
     traces:
       receivers: [otlp]
       processors: [batch]
-      exporters: [debug]
+      exporters: [debug, otlp/tempo]
