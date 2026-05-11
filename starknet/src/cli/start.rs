@@ -22,6 +22,14 @@ pub struct StartCommand {
         default_value = "false"
     )]
     ingest_traces: bool,
+
+    /// Ingest pre-confirmed blocks.
+    #[arg(
+        long = "starknet.ingest-pre-confirmed",
+        env = "STARKNET_INGEST_PRE_CONFIRMED",
+        default_value = "false"
+    )]
+    ingest_pre_confirmed: bool,
 }
 
 impl StartCommand {
@@ -29,7 +37,7 @@ impl StartCommand {
         info!("Starting Starknet DNA server");
         let provider = self.rpc.to_starknet_provider()?;
         let starknet_ingestion_options = StarknetBlockIngestionOptions {
-            ingest_pending: false,
+            ingest_pending: self.ingest_pre_confirmed,
             ingest_traces: self.ingest_traces,
         };
         let starknet_chain = StarknetChainSupport::new(provider, starknet_ingestion_options);
