@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use apibara_dna_common::{
     chain::{BlockInfo, PendingBlockInfo},
     fragment::{
@@ -5,14 +7,16 @@ use apibara_dna_common::{
         JoinFragment, JoinGroupFragment,
     },
     index::{BitmapIndexBuilder, ScalarValue},
-    ingestion::{BlockIngestion, IngestionError},
+    ingestion::{BlockIngestion, BoxedNewHeadsStream, IngestionError},
     join::{JoinToManyIndexBuilder, JoinToOneIndexBuilder},
     Cursor, Hash,
 };
 use apibara_dna_protocol::starknet;
 use error_stack::{Report, Result, ResultExt};
+// use futures::StreamExt;
 use prost::Message;
-use tracing::Instrument;
+use tokio_stream::StreamExt as TokioStreamExt;
+use tracing::{info, Instrument};
 
 use crate::{
     filter::{ContractChangeType, TransactionType},
@@ -30,7 +34,11 @@ use crate::{
         TRACE_FRAGMENT_ID, TRACE_FRAGMENT_NAME, TRANSACTION_FRAGMENT_ID, TRANSACTION_FRAGMENT_NAME,
     },
     proto::{convert_block_header, convert_pre_confirmed_block_header, ModelExt},
-    provider::{models, BlockExt, BlockId, StarknetProvider, StarknetProviderErrorExt},
+    provider::{
+        models, BlockExt, BlockId, StarknetProvider, StarknetProviderError,
+        StarknetProviderErrorExt,
+    },
+    NewHeadsStream,
 };
 
 #[derive(Clone, Debug)]
@@ -41,12 +49,21 @@ pub struct StarknetBlockIngestionOptions {
 
 pub struct StarknetBlockIngestion {
     provider: StarknetProvider,
+    ws_url: Option<String>,
     options: StarknetBlockIngestionOptions,
 }
 
 impl StarknetBlockIngestion {
-    pub fn new(provider: StarknetProvider, options: StarknetBlockIngestionOptions) -> Self {
-        Self { provider, options }
+    pub fn new(
+        provider: StarknetProvider,
+        ws_url: Option<String>,
+        options: StarknetBlockIngestionOptions,
+    ) -> Self {
+        Self {
+            provider,
+            ws_url,
+            options,
+        }
     }
 }
 
@@ -59,6 +76,34 @@ struct BlockIngestionResult {
 impl BlockIngestion for StarknetBlockIngestion {
     fn supports_pending(&self) -> bool {
         self.options.ingest_pending
+    }
+
+    #[tracing::instrument("starknet_new_heads_stream", skip_all, err(Debug))]
+    async fn new_heads_stream(&self) -> Result<BoxedNewHeadsStream, IngestionError> {
+        let Some(url) = self.ws_url.as_ref() else {
+            use futures::StreamExt;
+            return Ok(futures::stream::pending().boxed());
+        };
+
+        info!("subscribing to new starknet heads");
+
+        let stream = NewHeadsStream::connect(url)
+            .await
+            .change_context(IngestionError::RpcRequest)
+            .attach_printable("failed to connect to starknet ws")?
+            .timeout(Duration::from_secs(60))
+            .map(|message| match message {
+                Ok(Ok(head)) => Ok(head.cursor()),
+                Ok(Err(err)) => Err(err).change_context(IngestionError::RpcRequest),
+                Err(err) => Err(err)
+                    .change_context(StarknetProviderError::Timeout)
+                    .change_context(IngestionError::RpcRequest),
+            });
+
+        {
+            use futures::StreamExt;
+            Ok(stream.boxed())
+        }
     }
 
     #[tracing::instrument("starknet_get_head_cursor", skip_all, err(Debug))]
@@ -374,6 +419,7 @@ impl Clone for StarknetBlockIngestion {
     fn clone(&self) -> Self {
         Self {
             provider: self.provider.clone(),
+            ws_url: self.ws_url.clone(),
             options: self.options.clone(),
         }
     }

@@ -15,6 +15,10 @@ pub struct StartCommand {
     #[clap(flatten)]
     start: StartArgs,
 
+    /// If set, use WebSocket to trigger block ingestion.
+    #[arg(long = "starknet.ws-url", env = "STARKNET_WS_URL")]
+    ws_url: Option<String>,
+
     /// Ingest traces.
     #[arg(
         long = "starknet.ingest-traces",
@@ -40,7 +44,8 @@ impl StartCommand {
             ingest_pending: self.ingest_pre_confirmed,
             ingest_traces: self.ingest_traces,
         };
-        let starknet_chain = StarknetChainSupport::new(provider, starknet_ingestion_options);
+        let starknet_chain =
+            StarknetChainSupport::new(provider, self.ws_url, starknet_ingestion_options);
 
         run_server(starknet_chain, self.start, env!("CARGO_PKG_VERSION"), ct)
             .await

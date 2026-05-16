@@ -1,6 +1,7 @@
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use apibara_dna_common::{Cursor, Hash};
 use error_stack::{Result, ResultExt};
 use futures::stream::SplitStream;
 use futures::{SinkExt, Stream, StreamExt};
@@ -11,10 +12,12 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
 use super::http::StarknetProviderError;
 
-/// The websocket stream is used only to drive the polling loop.
-/// There is no need to parse the messages, as they are discarded.
+/// A new head message received from the Starknet websocket subscription.
 #[derive(Debug)]
-pub struct NewHeadMessage;
+pub struct NewHeadMessage {
+    block_number: u64,
+    block_hash: Hash,
+}
 
 /// A stream of new heads from a Starknet websocket subscription.
 pub struct NewHeadsStream {
@@ -55,13 +58,61 @@ impl NewHeadsStream {
 }
 
 impl NewHeadMessage {
+    pub fn cursor(&self) -> Cursor {
+        Cursor::new(self.block_number, self.block_hash.clone())
+    }
+
     pub fn try_from_message(msg: Message) -> Result<Option<Self>, StarknetProviderError> {
-        let Message::Text(_text) = msg else {
+        #[derive(Debug, serde::Deserialize)]
+        struct WsMessage {
+            params: Option<WsParams>,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct WsParams {
+            result: WsBlockResult,
+        }
+
+        #[derive(Debug, serde::Deserialize)]
+        struct WsBlockResult {
+            block_hash: String,
+            block_number: u64,
+        }
+
+        let Message::Text(text) = msg else {
             return Ok(None);
         };
 
-        Ok(NewHeadMessage.into())
+        let msg: WsMessage = serde_json::from_str(&text)
+            .change_context(StarknetProviderError::Request)
+            .attach_printable("failed to parse websocket message as json")?;
+
+        let Some(params) = msg.params else {
+            return Ok(None);
+        };
+
+        let block_number = params.result.block_number;
+        let block_hash_hex = params.result.block_hash;
+
+        let block_hash = decode_hex_felt(&block_hash_hex)
+            .change_context(StarknetProviderError::Request)
+            .attach_printable_lazy(|| format!("failed to decode block_hash: {}", block_hash_hex))?;
+
+        Ok(Some(NewHeadMessage {
+            block_number,
+            block_hash: Hash(block_hash),
+        }))
     }
+}
+
+fn decode_hex_felt(hex: &str) -> std::result::Result<Vec<u8>, hex::FromHexError> {
+    let hex = hex.trim_start_matches("0x");
+    let hex = if hex.len() % 2 == 1 {
+        format!("0{}", hex)
+    } else {
+        hex.to_string()
+    };
+    hex::decode(&hex)
 }
 
 impl Stream for NewHeadsStream {

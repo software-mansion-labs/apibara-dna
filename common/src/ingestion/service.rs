@@ -1,5 +1,7 @@
 use std::{
+    fmt,
     future::Future,
+    pin::Pin,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -7,7 +9,7 @@ use std::{
 use apibara_etcd::{EtcdClient, Lock};
 use apibara_observability::{KeyValue, RecordRequest};
 use error_stack::{Result, ResultExt};
-use futures::{stream::FuturesOrdered, StreamExt};
+use futures::{stream::FuturesOrdered, Stream, StreamExt};
 use tokio::{
     task::{JoinError, JoinHandle},
     time::Interval,
@@ -27,6 +29,9 @@ use crate::{
 };
 
 use super::{error::IngestionError, metrics::IngestionMetrics, state_client::IngestionStateClient};
+
+pub type BoxedNewHeadsStream =
+    Pin<Box<dyn Stream<Item = Result<Cursor, IngestionError>> + Send + 'static>>;
 
 pub trait BlockIngestion: Clone {
     fn supports_pending(&self) -> bool {
@@ -54,6 +59,12 @@ pub trait BlockIngestion: Clone {
     ) -> impl Future<Output = Result<Option<(PendingBlockInfo, Block)>, IngestionError>> + Send
     {
         async { Ok(None) }
+    }
+
+    fn new_heads_stream(
+        &self,
+    ) -> impl Future<Output = Result<BoxedNewHeadsStream, IngestionError>> + Send {
+        async { Ok(futures::stream::pending().boxed()) }
     }
 }
 
@@ -121,7 +132,6 @@ struct PendingBlockState {
     generation: u64,
 }
 
-#[derive(Debug)]
 pub struct IngestState {
     pub finalized: Cursor,
     pub head: Cursor,
@@ -131,6 +141,26 @@ pub struct IngestState {
     pending_refresh_interval: Interval,
     head_refresh_interval: Interval,
     finalized_refresh_interval: Interval,
+    new_heads_stream: Pin<Box<dyn Stream<Item = Result<Cursor, IngestionError>> + Send>>,
+}
+
+impl fmt::Debug for IngestState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("IngestState")
+            .field("finalized", &self.finalized)
+            .field("head", &self.head)
+            .field("last_ingested", &self.last_ingested)
+            .field("queued_block_number", &self.queued_block_number)
+            .field("pending_block_state", &self.pending_block_state)
+            .field("pending_refresh_interval", &self.pending_refresh_interval)
+            .field("head_refresh_interval", &self.head_refresh_interval)
+            .field(
+                "finalized_refresh_interval",
+                &self.finalized_refresh_interval,
+            )
+            .field("new_heads_stream", &"<stream>")
+            .finish()
+    }
 }
 
 #[derive(Debug)]
@@ -276,25 +306,7 @@ where
 
                 info!(cursor = %starting_cursor, "uploaded genesis block");
 
-                Ok(IngestionState::Ingest(IngestState {
-                    queued_block_number: starting_cursor.number,
-                    finalized,
-                    head,
-                    last_ingested: starting_cursor,
-                    pending_block_state: PendingBlockState::default(),
-                    pending_refresh_interval: tokio::time::interval(
-                        self.options.pending_refresh_interval,
-                    ),
-                    head_refresh_interval: tokio::time::interval(
-                        self.options.head_refresh_interval,
-                    ),
-                    finalized_refresh_interval: tokio::time::interval(
-                        self.options.finalized_refresh_interval,
-                    ),
-                }))
-            }
-            IngestionStartAction::Resume(starting_cursor) => {
-                current_span.record("starting_block", starting_cursor.number);
+                let new_heads_stream = self.ingestion.new_heads_stream().await;
 
                 Ok(IngestionState::Ingest(IngestState {
                     queued_block_number: starting_cursor.number,
@@ -311,6 +323,30 @@ where
                     finalized_refresh_interval: tokio::time::interval(
                         self.options.finalized_refresh_interval,
                     ),
+                    new_heads_stream,
+                }))
+            }
+            IngestionStartAction::Resume(starting_cursor) => {
+                current_span.record("starting_block", starting_cursor.number);
+
+                let new_heads_stream = self.ingestion.new_heads_stream().await;
+
+                Ok(IngestionState::Ingest(IngestState {
+                    queued_block_number: starting_cursor.number,
+                    finalized,
+                    head,
+                    last_ingested: starting_cursor,
+                    pending_block_state: PendingBlockState::default(),
+                    pending_refresh_interval: tokio::time::interval(
+                        self.options.pending_refresh_interval,
+                    ),
+                    head_refresh_interval: tokio::time::interval(
+                        self.options.head_refresh_interval,
+                    ),
+                    finalized_refresh_interval: tokio::time::interval(
+                        self.options.finalized_refresh_interval,
+                    ),
+                    new_heads_stream,
                 }))
             }
         }
@@ -335,6 +371,29 @@ where
 
             _ = ct.cancelled() => Ok(IngestionState::Ingest(state)),
 
+            result = state.new_heads_stream.next() => {
+                match result {
+                    Some(Ok(head)) => {
+                        current_span.record("action", "new_head_stream");
+
+                        // Reset the backup head refresher
+                        state.head_refresh_interval.reset();
+
+                        self.tick_refresh_head(state, head).await
+                    }
+                    Some(Err(err)) => {
+                        warn!(error = ?err, "new heads stream error, reconnecting");
+                        state.new_heads_stream = self.ingestion.new_heads_stream().await;
+                        Ok(IngestionState::Ingest(state))
+                    }
+                    None => {
+                        warn!("new heads stream ended, reconnecting");
+                        state.new_heads_stream = self.ingestion.new_heads_stream().await;
+                        Ok(IngestionState::Ingest(state))
+                    }
+                }
+            }
+
             _ = state.finalized_refresh_interval.tick() => {
                 current_span.record("action", "refresh_finalized");
 
@@ -350,7 +409,14 @@ where
             _ = state.head_refresh_interval.tick() => {
                 current_span.record("action", "refresh_head");
 
-                self.tick_refresh_head(state).await
+                let head = self
+                    .ingestion
+                    .get_head_cursor()
+                    .await
+                    .change_context(IngestionError::RpcRequest)
+                    .attach_printable("failed to refresh head cursor")?;
+
+                self.tick_refresh_head(state, head).await
             }
 
             join_result = self.task_queue_next(), if !self.task_queue_is_empty() => {
@@ -395,14 +461,8 @@ where
     pub async fn tick_refresh_head(
         &mut self,
         mut state: IngestState,
+        head: Cursor,
     ) -> Result<IngestionState, IngestionError> {
-        let head = self
-            .ingestion
-            .get_head_cursor()
-            .await
-            .change_context(IngestionError::RpcRequest)
-            .attach_printable("failed to refresh head cursor")?;
-
         if state.head == head {
             return Ok(IngestionState::Ingest(state));
         }
@@ -692,6 +752,8 @@ where
 
         info!(new_head = %new_head_candidate, "recovered from a chain reorganization");
 
+        let new_heads_stream = self.ingestion.new_heads_stream().await;
+
         Ok(IngestionState::Ingest(IngestState {
             finalized: state.finalized,
             head: state.existing_head,
@@ -703,6 +765,7 @@ where
             finalized_refresh_interval: tokio::time::interval(
                 self.options.finalized_refresh_interval,
             ),
+            new_heads_stream,
         }))
     }
 
@@ -803,6 +866,16 @@ where
 {
     fn supports_pending(&self) -> bool {
         self.ingestion.supports_pending()
+    }
+
+    async fn new_heads_stream(&self) -> BoxedNewHeadsStream {
+        match self.ingestion.new_heads_stream().await {
+            Ok(stream) => stream,
+            Err(e) => {
+                tracing::warn!("failed to get new heads stream: {:?}", e);
+                futures::stream::pending().boxed()
+            }
+        }
     }
 
     #[tracing::instrument("ingestion_ingest_block", skip(self), err(Debug))]

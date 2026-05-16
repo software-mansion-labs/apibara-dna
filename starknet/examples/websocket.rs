@@ -2,6 +2,7 @@
 
 use std::{pin::Pin, time::Duration};
 
+use apibara_dna_common::Cursor;
 use apibara_dna_starknet::{provider::StarknetProviderError, NewHeadsStream};
 use error_stack::{Result, ResultExt};
 use futures::Stream;
@@ -9,13 +10,13 @@ use tokio_stream::StreamExt;
 
 async fn connect_to_stream(
     url: &str,
-) -> Pin<Box<impl Stream<Item = Result<(), StarknetProviderError>>>> {
+) -> Pin<Box<impl Stream<Item = Result<Cursor, StarknetProviderError>>>> {
     let heads = NewHeadsStream::connect(&url)
         .await
         .expect("connection error")
         .timeout(Duration::from_secs(10))
         .map(|message| match message {
-            Ok(Ok(_)) => Ok(()),
+            Ok(Ok(head)) => Ok(head.cursor()),
             Ok(Err(err)) => Err(err),
             Err(err) => Err(err).change_context(StarknetProviderError::Timeout),
         });
@@ -31,9 +32,9 @@ async fn main() {
 
     loop {
         match heads.try_next().await {
-            Ok(Some(_head)) => {
+            Ok(Some(head)) => {
                 let now = time::OffsetDateTime::now_local().expect("datetime");
-                println!("new head {}", now);
+                println!("new head {} [{}]", head, now);
             }
             _ => {
                 println!("reconnect to the stream");
