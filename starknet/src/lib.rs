@@ -11,6 +11,7 @@ use ingestion::StarknetBlockIngestion;
 use provider::StarknetProvider;
 
 pub use ingestion::StarknetBlockIngestionOptions;
+pub use provider::{NewHeadMessage, NewHeadsStream};
 
 pub mod cli;
 pub mod error;
