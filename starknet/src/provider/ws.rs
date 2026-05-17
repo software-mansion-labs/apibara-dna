@@ -139,6 +139,7 @@ impl SubscribeRequest {
         use serde_json::json;
         let payload = json!({
             "jsonrpc": "2.0",
+            "id": 0,
             "method": "starknet_subscribeNewHeads",
             "params": [self.block_id]
         });
