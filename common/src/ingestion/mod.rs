@@ -16,7 +16,9 @@ use crate::options_store::OptionsStore;
 pub use self::cli::IngestionArgs;
 pub use self::error::{IngestionError, IngestionErrorExt};
 pub use self::metrics::IngestionMetrics;
-pub use self::service::{BlockIngestion, IngestionService, IngestionServiceOptions};
+pub use self::service::{
+    BlockIngestion, BoxedNewHeadsStream, IngestionService, IngestionServiceOptions,
+};
 pub use self::state_client::{
     IngestionStateClient, IngestionStateClientError, IngestionStateUpdate, FINALIZED_KEY,
     INGESTED_KEY, INGESTION_PREFIX_KEY, STARTING_BLOCK_KEY,

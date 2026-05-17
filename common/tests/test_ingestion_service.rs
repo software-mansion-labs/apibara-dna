@@ -26,6 +26,14 @@ use testing::{
 };
 use tokio_util::sync::CancellationToken;
 
+async fn get_test_head(provider: &std::sync::Arc<AnvilProvider>) -> apibara_dna_common::Cursor {
+    use alloy_rpc_types::BlockNumberOrTag;
+    use apibara_dna_common::{Cursor, Hash};
+    let header = provider.get_header(BlockNumberOrTag::Latest).await;
+    let hash = Hash(header.hash.to_vec());
+    Cursor::new(header.number, hash)
+}
+
 async fn init_minio() -> (ContainerAsync<MinIO>, ObjectStore) {
     let minio = minio_container().start().await.unwrap();
     let config = minio.s3_config().await;
@@ -207,7 +215,8 @@ async fn test_ingestion_advances_as_head_changes() {
     // Nothing changed, so state is the same.
     let state = starting_state.take_ingest().unwrap();
     let prev_head = state.head.clone();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     assert_eq!(service.task_queue_len(), 0);
     assert_eq!(state.head, prev_head);
@@ -217,7 +226,8 @@ async fn test_ingestion_advances_as_head_changes() {
     let header = anvil_provider.get_header(BlockNumberOrTag::Latest).await;
     assert_eq!(header.number, 110);
 
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = Cursor::new(header.number, Hash(header.hash.to_vec()));
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -301,7 +311,8 @@ async fn test_ingestion_not_affected_by_reorg_after_ingested_block() {
     assert_eq!(service.task_queue_len(), 0);
 
     let state = starting_state.take_ingest().unwrap();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -313,7 +324,8 @@ async fn test_ingestion_not_affected_by_reorg_after_ingested_block() {
     let header = anvil_provider.get_header(BlockNumberOrTag::Latest).await;
     assert_eq!(header.number, 100);
 
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = Cursor::new(header.number, Hash(header.hash.to_vec()));
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     assert_ne!(state.head, prev_head);
 }
@@ -356,7 +368,8 @@ async fn test_ingestion_detect_shrinking_reorg_on_head_refresh() {
     assert_eq!(service.task_queue_len(), 0);
 
     let state = starting_state.take_ingest().unwrap();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -388,7 +401,8 @@ async fn test_ingestion_detect_shrinking_reorg_on_head_refresh() {
     assert_eq!(chain_segment_before_recovery.info.last_block.number, 100);
     let block_before_recovery = chain_segment_before_recovery.canonical(95).unwrap();
 
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     assert!(state.is_recover());
 
     let state = state.take_recover().unwrap();
@@ -446,7 +460,8 @@ async fn test_ingestion_detect_shrinking_reorg_on_block_ingestion() {
     assert_eq!(service.task_queue_len(), 0);
 
     let state = starting_state.take_ingest().unwrap();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -541,7 +556,8 @@ async fn test_ingestion_detect_offline_reorg() {
     assert_eq!(service.task_queue_len(), 0);
 
     let state = starting_state.take_ingest().unwrap();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -633,7 +649,8 @@ async fn test_ingestion_detect_reorg_on_head_refresh() {
     assert_eq!(service.task_queue_len(), 0);
 
     let state = starting_state.take_ingest().unwrap();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -660,7 +677,8 @@ async fn test_ingestion_detect_reorg_on_head_refresh() {
     let header = anvil_provider.get_header(BlockNumberOrTag::Latest).await;
     assert_eq!(header.number, 100);
 
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = Cursor::new(header.number, Hash(header.hash.to_vec()));
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     assert!(state.is_recover());
 
     let chain_segment_before_recovery = service.current_chain_segment().unwrap();
@@ -720,7 +738,8 @@ async fn test_ingestion_detect_reorg_on_block_ingestion() {
     assert_eq!(service.task_queue_len(), 0);
 
     let state = starting_state.take_ingest().unwrap();
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = get_test_head(&anvil_provider).await;
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     let state = service.tick_refresh_finalized(state).await.unwrap();
     let state = state.take_ingest().unwrap();
@@ -748,7 +767,8 @@ async fn test_ingestion_detect_reorg_on_block_ingestion() {
     let header = anvil_provider.get_header(BlockNumberOrTag::Latest).await;
     assert_eq!(header.number, 120);
 
-    let state = service.tick_refresh_head(state).await.unwrap();
+    let head = Cursor::new(header.number, Hash(header.hash.to_vec()));
+    let state = service.tick_refresh_head(state, head).await.unwrap();
     let state = state.take_ingest().unwrap();
     assert_eq!(service.task_queue_len(), 5);
 

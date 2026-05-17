@@ -11,6 +11,7 @@ use ingestion::StarknetBlockIngestion;
 use provider::StarknetProvider;
 
 pub use ingestion::StarknetBlockIngestionOptions;
+pub use provider::{NewHeadMessage, NewHeadsStream};
 
 pub mod cli;
 pub mod error;
@@ -22,12 +23,21 @@ pub mod provider;
 
 pub struct StarknetChainSupport {
     provider: StarknetProvider,
+    ws_url: Option<String>,
     options: StarknetBlockIngestionOptions,
 }
 
 impl StarknetChainSupport {
-    pub fn new(provider: StarknetProvider, options: StarknetBlockIngestionOptions) -> Self {
-        Self { provider, options }
+    pub fn new(
+        provider: StarknetProvider,
+        ws_url: Option<String>,
+        options: StarknetBlockIngestionOptions,
+    ) -> Self {
+        Self {
+            provider,
+            ws_url,
+            options,
+        }
     }
 }
 
@@ -77,6 +87,10 @@ impl ChainSupport for StarknetChainSupport {
     }
 
     fn block_ingestion(&self) -> Self::BlockIngestion {
-        StarknetBlockIngestion::new(self.provider.clone(), self.options.clone())
+        StarknetBlockIngestion::new(
+            self.provider.clone(),
+            self.ws_url.clone(),
+            self.options.clone(),
+        )
     }
 }
