@@ -7,6 +7,7 @@ mod aws_s3;
 mod azure_blob;
 mod client;
 mod error;
+mod gcs;
 mod metrics;
 pub mod testing;
 
@@ -14,6 +15,7 @@ pub use self::aws_s3::AwsS3Client;
 pub use self::azure_blob::AzureBlobClient;
 pub use self::client::ObjectStoreClient;
 pub use self::error::{ObjectStoreError, ObjectStoreResultExt, ToObjectStoreResult};
+pub use self::gcs::GcsClient;
 
 /// Options for the object store.
 #[derive(Default, Clone, Debug)]
@@ -32,6 +34,11 @@ pub struct ObjectStore {
     bucket: String,
 }
 
+/// An opaque per-object version token used for optimistic concurrency.
+///
+/// Each backend stores whatever it uses for conditional requests: an HTTP ETag
+/// for S3 and Azure, the object generation number for GCS. Treat it as opaque —
+/// only the originating backend interprets its contents.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ObjectVersion(pub String);
 
@@ -102,6 +109,10 @@ impl ObjectStore {
     }
 
     pub fn new_azure_blob(client: AzureBlobClient, options: ObjectStoreOptions) -> Self {
+        Self::new(client.into(), options)
+    }
+
+    pub fn new_gcs(client: GcsClient, options: ObjectStoreOptions) -> Self {
         Self::new(client.into(), options)
     }
 
