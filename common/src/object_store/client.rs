@@ -2,14 +2,15 @@ use bytes::Bytes;
 use error_stack::Result;
 
 use super::{
-    azure_blob::AzureBlobClient, AwsS3Client, DeleteOptions, GetOptions, ObjectETag,
-    ObjectStoreError, PutOptions,
+    azure_blob::AzureBlobClient, AwsS3Client, DeleteOptions, GetOptions, ObjectStoreError,
+    ObjectVersion, PutOptions,
 };
 
 #[derive(Clone)]
 pub enum ObjectStoreClient {
     AwsS3(AwsS3Client),
     AzureBlob(Box<AzureBlobClient>),
+    Gcs(Box<GcsClient>),
 }
 
 impl ObjectStoreClient {
@@ -17,6 +18,7 @@ impl ObjectStoreClient {
         match self {
             Self::AwsS3(client) => client.has_bucket(name).await,
             Self::AzureBlob(client) => client.has_bucket(name).await,
+            Self::Gcs(client) => client.has_bucket(name).await,
         }
     }
 
@@ -24,6 +26,7 @@ impl ObjectStoreClient {
         match self {
             Self::AwsS3(client) => client.create_bucket(name).await,
             Self::AzureBlob(client) => client.create_bucket(name).await,
+            Self::Gcs(client) => client.create_bucket(name).await,
         }
     }
 

@@ -33,12 +33,12 @@ pub struct ObjectStore {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ObjectETag(pub String);
+pub struct ObjectVersion(pub String);
 
 #[derive(Default, Clone, Debug)]
 pub struct GetOptions {
-    /// If the object exists, check that the ETag matches.
-    pub etag: Option<ObjectETag>,
+    /// If the object exists, only return it if its version matches.
+    pub version: Option<ObjectVersion>,
 }
 
 /// How to put an object.
@@ -49,8 +49,8 @@ pub enum PutMode {
     Overwrite,
     /// Create the object only if it doesn't exist.
     Create,
-    /// Update the object only if it exists and the ETag matches.
-    Update(ObjectETag),
+    /// Update the object only if it exists and its version matches.
+    Update(ObjectVersion),
 }
 
 #[derive(Default, Clone, Debug)]
@@ -70,12 +70,12 @@ pub struct ListOptions {}
 #[derive(Debug)]
 pub struct GetResult {
     pub body: Bytes,
-    pub etag: ObjectETag,
+    pub version: ObjectVersion,
 }
 
 #[derive(Debug)]
 pub struct PutResult {
-    pub etag: ObjectETag,
+    pub version: ObjectVersion,
 }
 
 #[derive(Debug)]
@@ -128,7 +128,7 @@ impl ObjectStore {
         options: GetOptions,
     ) -> Result<GetResult, ObjectStoreError> {
         let key = self.full_key(path);
-        let (etag, body) = self
+        let (version, body) = self
             .client
             .get_object(&self.bucket, &key, options)
             .await
@@ -152,7 +152,7 @@ impl ObjectStore {
 
         let body = Bytes::copy_from_slice(data);
 
-        Ok(GetResult { body, etag })
+        Ok(GetResult { body, version })
     }
 
     #[tracing::instrument(
@@ -188,14 +188,14 @@ impl ObjectStore {
         current_span.record("compression_ratio", compression_ratio);
         debug!(compression_ratio, key, "compressed object");
 
-        let etag = self
+        let version = self
             .client
             .put_object(&self.bucket, &key, compressed.freeze(), options)
             .await
             .attach_printable("failed to put object")
             .attach_printable_lazy(|| format!("key: {key}"))?;
 
-        Ok(PutResult { etag })
+        Ok(PutResult { version })
     }
 
     #[tracing::instrument(name = "object_store_delete", skip(self, options), level = "debug")]
@@ -240,7 +240,7 @@ impl ObjectStore {
     }
 }
 
-impl From<String> for ObjectETag {
+impl From<String> for ObjectVersion {
     fn from(value: String) -> Self {
         Self(value)
     }

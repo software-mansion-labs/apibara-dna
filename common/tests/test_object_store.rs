@@ -2,8 +2,8 @@ use testcontainers::{runners::AsyncRunner, ContainerAsync};
 
 use apibara_dna_common::object_store::{
     testing::{self, azurite_container, minio_container, AzuriteExt, MinIOExt},
-    AwsS3Client, AzureBlobClient, DeleteOptions, GetOptions, ObjectETag, ObjectStore,
-    ObjectStoreClient, ObjectStoreOptions, ObjectStoreResultExt, PutMode, PutOptions,
+    AwsS3Client, AzureBlobClient, DeleteOptions, GetOptions, ObjectStore, ObjectStoreClient,
+    ObjectStoreOptions, ObjectStoreResultExt, ObjectVersion, PutMode, PutOptions,
 };
 
 async fn start_minio() -> (ContainerAsync<testing::MinIO>, ObjectStoreClient) {
@@ -34,10 +34,10 @@ async fn dot_put_and_get_no_prefix_no_precondition(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    assert!(!put_res.etag.0.is_empty());
+    assert!(!put_res.version.0.is_empty());
 
     let get_res = client.get("test", GetOptions::default()).await.unwrap();
-    assert_eq!(get_res.etag, put_res.etag);
+    assert_eq!(get_res.version, put_res.version);
     assert_eq!(get_res.body, "Hello, World".as_bytes());
 }
 
@@ -122,7 +122,7 @@ async fn do_test_get_with_etag(inner: ObjectStoreClient) {
         .get(
             "test",
             GetOptions {
-                etag: Some(put_res.etag),
+                version: Some(put_res.version),
             },
         )
         .await
@@ -132,7 +132,7 @@ async fn do_test_get_with_etag(inner: ObjectStoreClient) {
         .get(
             "test",
             GetOptions {
-                etag: Some(ObjectETag("bad etag".to_string())),
+                version: Some(ObjectVersion("bad version".to_string())),
             },
         )
         .await;
@@ -169,7 +169,7 @@ async fn do_put_with_overwrite(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    let original_etag = put_res.etag;
+    let original_etag = put_res.version;
 
     let put_res = client
         .put(
@@ -182,7 +182,7 @@ async fn do_put_with_overwrite(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    assert_ne!(put_res.etag, original_etag);
+    assert_ne!(put_res.version, original_etag);
 }
 
 #[tokio::test]
@@ -267,14 +267,14 @@ async fn do_put_with_update(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    let original_etag = response.etag;
+    let original_etag = response.version;
 
     let response = client
         .put(
             "test",
             "Something else".into(),
             PutOptions {
-                mode: PutMode::Update("bad etag".to_string().into()),
+                mode: PutMode::Update("bad version".to_string().into()),
             },
         )
         .await;
@@ -292,7 +292,7 @@ async fn do_put_with_update(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    assert_ne!(response.etag, original_etag);
+    assert_ne!(response.version, original_etag);
 }
 
 #[tokio::test]

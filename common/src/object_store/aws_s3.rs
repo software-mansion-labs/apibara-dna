@@ -2,8 +2,8 @@ use bytes::Bytes;
 use error_stack::{Result, ResultExt};
 
 use super::{
-    error::ObjectStoreError, metrics::ObjectStoreMetrics, DeleteOptions, GetOptions, ObjectETag,
-    ObjectStoreResultExt, PutMode, PutOptions, ToObjectStoreResult,
+    error::ObjectStoreError, metrics::ObjectStoreMetrics, DeleteOptions, GetOptions,
+    ObjectStoreResultExt, ObjectVersion, PutMode, PutOptions, ToObjectStoreResult,
 };
 
 #[derive(Clone)]
@@ -60,7 +60,7 @@ impl AwsS3Client {
         bucket: &str,
         key: &str,
         options: GetOptions,
-    ) -> Result<(ObjectETag, Bytes), ObjectStoreError> {
+    ) -> Result<(ObjectVersion, Bytes), ObjectStoreError> {
         self.metrics.get.add(1, &[]);
 
         let response = self
@@ -70,18 +70,18 @@ impl AwsS3Client {
             .key(key)
             .customize()
             .mutate_request(move |request| {
-                if let Some(etag) = &options.etag {
-                    request.headers_mut().insert("If-Match", etag.0.clone());
+                if let Some(version) = &options.version {
+                    request.headers_mut().insert("If-Match", version.0.clone());
                 }
             })
             .send()
             .await
             .change_to_object_store_context()?;
 
-        let etag = response
+        let version = response
             .e_tag
             .ok_or(ObjectStoreError::Metadata)
-            .attach_printable("missing etag")?
+            .attach_printable("missing version")?
             .into();
 
         let body = response
@@ -92,7 +92,7 @@ impl AwsS3Client {
             .attach_printable("failed to read object body")?
             .into_bytes();
 
-        Ok((etag, body))
+        Ok((version, body))
     }
 
     pub async fn put_object(
@@ -101,7 +101,7 @@ impl AwsS3Client {
         key: &str,
         body: Bytes,
         options: PutOptions,
-    ) -> Result<ObjectETag, ObjectStoreError> {
+    ) -> Result<ObjectVersion, ObjectStoreError> {
         self.metrics.put.add(1, &[]);
 
         let response = self
@@ -117,21 +117,21 @@ impl AwsS3Client {
                     // If-None-Match: "*" seems to be better supported than If-Match: "".
                     request.headers_mut().insert("If-None-Match", "*");
                 }
-                PutMode::Update(etag) => {
-                    request.headers_mut().insert("If-Match", etag.0.clone());
+                PutMode::Update(version) => {
+                    request.headers_mut().insert("If-Match", version.0.clone());
                 }
             })
             .send()
             .await
             .change_to_object_store_context()?;
 
-        let etag = response
+        let version = response
             .e_tag
             .ok_or(ObjectStoreError::Metadata)
-            .attach_printable("missing etag")?
+            .attach_printable("missing version")?
             .into();
 
-        Ok(etag)
+        Ok(version)
     }
 
     pub async fn list_objects(
