@@ -1,9 +1,7 @@
-use error_stack::{Result, ResultExt};
-use tracing::debug;
-
 use crate::chain::{CanonicalChainSegment, ReconnectAction};
 use crate::chain_store::ChainStore;
 use crate::Cursor;
+use error_stack::{Result, ResultExt};
 
 use super::ChainViewError;
 
@@ -44,15 +42,8 @@ impl FullCanonicalChain {
         store: ChainStore,
         starting_block: u64,
         chain_segment_size: usize,
+        recent: CanonicalChainSegment,
     ) -> Result<Self, ChainViewError> {
-        let recent = store
-            .get_recent(None)
-            .await
-            .change_context(ChainViewError)
-            .attach_printable("failed to get recent canonical chain segment")?
-            .ok_or(ChainViewError)
-            .attach_printable("recent canonical chain segment not found")?;
-
         Ok(Self {
             store,
             starting_block,
@@ -138,16 +129,8 @@ impl FullCanonicalChain {
         Ok(CanonicalCursor::Canonical(cursor))
     }
 
-    pub async fn refresh_recent(&mut self) -> Result<(), ChainViewError> {
-        debug!("refreshing recent canonical chain segment");
-
-        let Ok(Some(recent)) = self.store.get_recent(None).await else {
-            return Ok(());
-        };
-
+    pub fn set_recent(&mut self, recent: CanonicalChainSegment) {
         self.recent = recent;
-
-        Ok(())
     }
 
     async fn get_chain_segment(
