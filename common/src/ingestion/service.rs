@@ -302,6 +302,12 @@ where
                     .grow(block_info)
                     .change_context(IngestionError::Model)?;
 
+                let current_segment = self
+                    .chain_builder
+                    .current_segment()
+                    .change_context(IngestionError::Model)?;
+                self.publish_recent_segment(&current_segment).await?;
+
                 current_span.record("starting_block", starting_block);
 
                 info!(cursor = %starting_cursor, "uploaded genesis block");
@@ -539,7 +545,6 @@ where
         join_result: Option<IngestionJobJoinResult>,
     ) -> Result<IngestionState, IngestionError> {
         let mut last_ingested = state.last_ingested.clone();
-
         if let Some(join_result) = join_result {
             let task_result = join_result
                 .change_context(IngestionError::RpcRequest)
@@ -638,16 +643,8 @@ where
                     .chain_builder
                     .current_segment()
                     .change_context(IngestionError::Model)?;
-                info!(first_block = %current_segment.info.first_block, last_block = %current_segment.info.last_block, "uploading recent chain segment");
-                let recent_etag = self
-                    .chain_store
-                    .put_recent(&current_segment)
-                    .await
-                    .change_context(IngestionError::CanonicalChainStoreRequest)?;
-                self.state_client
-                    .put_ingested(recent_etag)
-                    .await
-                    .change_context(IngestionError::StateClientRequest)?;
+                info!(first_block = %current_segment.info.first_block, last_block = %current_segment.info.last_block, "publishing recent chain segment");
+                self.publish_recent_segment(&current_segment).await?;
             }
         }
 
@@ -750,6 +747,12 @@ where
             .attach_printable("failed to shrink canonical chain after reorg recovery")
             .attach_printable_lazy(|| format!("new head: {}", new_head_candidate))?;
 
+        let current_segment = self
+            .chain_builder
+            .current_segment()
+            .change_context(IngestionError::Model)?;
+        self.publish_recent_segment(&current_segment).await?;
+
         info!(new_head = %new_head_candidate, "recovered from a chain reorganization");
 
         let new_heads_stream = self.ingestion.new_heads_stream().await;
@@ -811,13 +814,37 @@ where
         self.chain_builder.current_segment().ok()
     }
 
-    async fn get_starting_cursor(&mut self) -> Result<IngestionStartAction, IngestionError> {
-        let existing_chain_segment = self
+    async fn publish_recent_segment(
+        &mut self,
+        segment: &CanonicalChainSegment,
+    ) -> Result<(), IngestionError> {
+        let pointer = self
             .chain_store
-            .get_recent(None)
+            .put_recent_snapshot(segment)
             .await
-            .change_context(IngestionError::CanonicalChainStoreRequest)
-            .attach_printable("failed to get recent canonical chain segment")?;
+            .change_context(IngestionError::CanonicalChainStoreRequest)?;
+
+        self.state_client
+            .put_recent(&pointer)
+            .await
+            .change_context(IngestionError::StateClientRequest)
+    }
+
+    async fn get_starting_cursor(&mut self) -> Result<IngestionStartAction, IngestionError> {
+        let existing_chain_segment = match self
+            .state_client
+            .get_recent()
+            .await
+            .change_context(IngestionError::StateClientRequest)?
+        {
+            Some(pointer) => self
+                .chain_store
+                .get_recent_snapshot(&pointer)
+                .await
+                .change_context(IngestionError::CanonicalChainStoreRequest)
+                .attach_printable("failed to get recent canonical chain snapshot")?,
+            None => None,
+        };
 
         if let Some(existing_chain_segment) = existing_chain_segment {
             info!("restoring canonical chain");

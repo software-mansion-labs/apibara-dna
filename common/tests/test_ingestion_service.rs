@@ -8,6 +8,7 @@ use testcontainers::{runners::AsyncRunner, ContainerAsync};
 
 use apibara_dna_common::{
     chain::BlockInfo,
+    chain_store::ChainStore,
     file_cache::FileCache,
     fragment,
     ingestion::{
@@ -123,9 +124,9 @@ async fn test_ingestion_initialize() {
     assert!(finalized.is_some());
     assert_eq!(ingest_state.finalized.number, finalized.unwrap());
 
-    // Ingested is updated only after a chain segment is uploaded.
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
+    let recent = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(recent.last_block, 0);
+    assert!(recent.key.starts_with("canon/recent/"));
 }
 
 #[tokio::test]
@@ -171,9 +172,9 @@ async fn test_ingestion_initialize_with_starting_block() {
     assert!(finalized.is_some());
     assert_eq!(ingest_state.finalized.number, finalized.unwrap());
 
-    // Ingested is updated only after a chain segment is uploaded.
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
+    let recent = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(recent.last_block, 100);
+    assert!(recent.key.starts_with("canon/recent/"));
 }
 
 #[tokio::test]
@@ -199,7 +200,7 @@ async fn test_ingestion_advances_as_head_changes() {
     let mut service = IngestionService::new(
         block_ingestion,
         etcd_client,
-        object_store,
+        object_store.clone(),
         file_cache,
         options,
         IngestionMetrics::default(),
@@ -248,10 +249,6 @@ async fn test_ingestion_advances_as_head_changes() {
         state = Some(next_state);
     }
 
-    // Not enough blocks ingested yet.
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
-
     for _ in 0..4 {
         let join_result = service.task_queue_next().await;
         let next_state = service
@@ -262,17 +259,23 @@ async fn test_ingestion_advances_as_head_changes() {
         state = Some(next_state);
     }
 
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
-
     let join_result = service.task_queue_next().await;
     service
         .tick_with_task_result(state.take().unwrap(), join_result)
         .await
+        .unwrap()
+        .take_ingest()
         .unwrap();
 
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_some());
+    let recent = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(recent.last_block, 10);
+    let chain_store = ChainStore::new(object_store.clone(), init_file_cache().await);
+    let recent_segment = chain_store
+        .get_recent_snapshot(&recent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recent_segment.info.last_block.number, 10);
 }
 
 #[tokio::test]

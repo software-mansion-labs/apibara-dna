@@ -93,18 +93,26 @@ impl ChainViewSyncService {
             .await
             .change_context(ChainViewError)?;
 
-        loop {
+        let recent = loop {
             if ct.is_cancelled() {
                 return Ok(());
             }
 
-            let recent = ingestion_state_client
-                .get_ingested()
+            if let Some(pointer) = ingestion_state_client
+                .get_recent()
                 .await
-                .change_context(ChainViewError)?;
-
-            if recent.is_some() {
-                break;
+                .change_context(ChainViewError)?
+            {
+                let recent = self
+                    .chain_store
+                    .get_recent_snapshot(&pointer)
+                    .await
+                    .change_context(ChainViewError)
+                    .attach_printable("failed to get recent canonical chain snapshot")?
+                    .ok_or(ChainViewError)
+                    .attach_printable("recent canonical chain snapshot not found")
+                    .attach_printable_lazy(|| format!("key: {}", pointer.key))?;
+                break recent;
             }
 
             info!(
@@ -112,7 +120,7 @@ impl ChainViewSyncService {
                 "chain_view: waiting for ingestion to start"
             );
             tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+        };
 
         if ct.is_cancelled() {
             return Ok(());
@@ -131,6 +139,7 @@ impl ChainViewSyncService {
             self.chain_store.clone(),
             starting_block,
             chain_segment_size,
+            recent,
         )
         .await?;
 
@@ -210,8 +219,17 @@ impl ChainViewSyncService {
                         IngestionStateUpdate::Pending(generation) => {
                             chain_view.set_pending_generation(generation).await;
                         }
-                        IngestionStateUpdate::Ingested(_etag) => {
-                            chain_view.refresh_recent().await?;
+                        IngestionStateUpdate::Recent(pointer) => {
+                            let recent = self
+                                .chain_store
+                                .get_recent_snapshot(&pointer)
+                                .await
+                                .change_context(ChainViewError)
+                                .attach_printable("failed to get recent canonical chain snapshot")?
+                                .ok_or(ChainViewError)
+                                .attach_printable("recent canonical chain snapshot not found")
+                                .attach_printable_lazy(|| format!("key: {}", pointer.key))?;
+                            chain_view.set_recent(recent).await?;
                         }
                     }
 
