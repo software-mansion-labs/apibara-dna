@@ -1,9 +1,12 @@
 use testcontainers::{runners::AsyncRunner, ContainerAsync};
 
 use apibara_dna_common::object_store::{
-    testing::{self, azurite_container, minio_container, AzuriteExt, MinIOExt},
+    testing::{
+        self, azurite_container, fake_gcs_server_container, minio_container, AzuriteExt,
+        FakeGcsServerExt, MinIOExt,
+    },
     AwsS3Client, AzureBlobClient, DeleteOptions, GetOptions, ObjectStore, ObjectStoreClient,
-    ObjectStoreOptions, ObjectStoreResultExt, ObjectVersion, PutMode, PutOptions,
+    ObjectStoreError, ObjectStoreOptions, ObjectStoreResultExt, ObjectVersion, PutMode, PutOptions,
 };
 
 async fn start_minio() -> (ContainerAsync<testing::MinIO>, ObjectStoreClient) {
@@ -17,6 +20,12 @@ async fn start_azurite() -> (ContainerAsync<testing::Azurite>, ObjectStoreClient
     let azurite = azurite_container().start().await.unwrap();
     let client = AzureBlobClient::new(azurite.location().await, azurite.credentials());
     (azurite, client.into())
+}
+
+async fn start_fake_gcs_server() -> (ContainerAsync<testing::FakeGcsServer>, ObjectStoreClient) {
+    let server = fake_gcs_server_container().start().await.unwrap();
+    let client = server.gcs_client().await.unwrap();
+    (server, client.into())
 }
 
 async fn dot_put_and_get_no_prefix_no_precondition(inner: ObjectStoreClient) {
@@ -50,6 +59,12 @@ async fn test_s3_put_and_get_no_prefix_no_precondition() {
 #[tokio::test]
 async fn test_azure_blob_put_and_get_no_prefix_no_precondition() {
     let (_azurite, client) = start_azurite().await;
+    dot_put_and_get_no_prefix_no_precondition(client).await;
+}
+
+#[tokio::test]
+async fn test_gcs_put_and_get_no_prefix_no_precondition() {
+    let (_server, client) = start_fake_gcs_server().await;
     dot_put_and_get_no_prefix_no_precondition(client).await;
 }
 
@@ -102,7 +117,13 @@ async fn test_azure_put_and_get_with_prefix_no_precondition() {
     do_put_and_get_with_prefix_no_precondition(client).await;
 }
 
-async fn do_test_get_with_etag(inner: ObjectStoreClient) {
+#[tokio::test]
+async fn test_gcs_put_and_get_with_prefix_no_precondition() {
+    let (_server, client) = start_fake_gcs_server().await;
+    do_put_and_get_with_prefix_no_precondition(client).await;
+}
+
+async fn do_test_get_with_version(inner: ObjectStoreClient) {
     let client = ObjectStore::new(
         inner,
         ObjectStoreOptions {
@@ -132,7 +153,7 @@ async fn do_test_get_with_etag(inner: ObjectStoreClient) {
         .get(
             "test",
             GetOptions {
-                version: Some(ObjectVersion("bad version".to_string())),
+                version: Some(ObjectVersion("123456789".to_string())),
             },
         )
         .await;
@@ -144,13 +165,40 @@ async fn do_test_get_with_etag(inner: ObjectStoreClient) {
 #[tokio::test]
 async fn test_s3_get_with_etag() {
     let (_minio, client) = start_minio().await;
-    do_test_get_with_etag(client).await;
+    do_test_get_with_version(client).await;
 }
 
 #[tokio::test]
 async fn test_azure_get_with_etag() {
     let (_azurite, client) = start_azurite().await;
-    do_test_get_with_etag(client).await;
+    do_test_get_with_version(client).await;
+}
+
+#[tokio::test]
+async fn test_gcs_get_rejects_invalid_generation() {
+    let (_server, client) = start_fake_gcs_server().await;
+    let client = ObjectStore::new(
+        client,
+        ObjectStoreOptions {
+            bucket: "test".to_string(),
+            ..Default::default()
+        },
+    );
+
+    let error = client
+        .get(
+            "test",
+            GetOptions {
+                version: Some(ObjectVersion("invalid generation".to_string())),
+            },
+        )
+        .await
+        .unwrap_err();
+
+    assert!(matches!(
+        error.current_context(),
+        ObjectStoreError::Metadata
+    ));
 }
 
 async fn do_put_with_overwrite(inner: ObjectStoreClient) {
@@ -169,7 +217,7 @@ async fn do_put_with_overwrite(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    let original_etag = put_res.version;
+    let original_version = put_res.version;
 
     let put_res = client
         .put(
@@ -182,7 +230,7 @@ async fn do_put_with_overwrite(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    assert_ne!(put_res.version, original_etag);
+    assert_ne!(put_res.version, original_version);
 }
 
 #[tokio::test]
@@ -194,6 +242,12 @@ async fn test_s3_put_with_overwrite() {
 #[tokio::test]
 async fn test_azure_put_with_overwrite() {
     let (_azurite, client) = start_azurite().await;
+    do_put_with_overwrite(client).await;
+}
+
+#[tokio::test]
+async fn test_gcs_put_with_overwrite() {
+    let (_server, client) = start_fake_gcs_server().await;
     do_put_with_overwrite(client).await;
 }
 
@@ -245,6 +299,12 @@ async fn test_azure_put_with_create() {
     do_put_with_create(client).await;
 }
 
+#[tokio::test]
+async fn test_gcs_put_with_create() {
+    let (_server, client) = start_fake_gcs_server().await;
+    do_put_with_create(client).await;
+}
+
 async fn do_put_with_update(inner: ObjectStoreClient) {
     let client = ObjectStore::new(
         inner,
@@ -267,14 +327,14 @@ async fn do_put_with_update(inner: ObjectStoreClient) {
         .await
         .unwrap();
 
-    let original_etag = response.version;
+    let original_version = response.version;
 
     let response = client
         .put(
             "test",
             "Something else".into(),
             PutOptions {
-                mode: PutMode::Update("bad version".to_string().into()),
+                mode: PutMode::Update("123456789".to_string().into()),
             },
         )
         .await;
@@ -286,13 +346,13 @@ async fn do_put_with_update(inner: ObjectStoreClient) {
             "test",
             "Something else".into(),
             PutOptions {
-                mode: PutMode::Update(original_etag.clone()),
+                mode: PutMode::Update(original_version.clone()),
             },
         )
         .await
         .unwrap();
 
-    assert_ne!(response.version, original_etag);
+    assert_ne!(response.version, original_version);
 }
 
 #[tokio::test]
@@ -304,6 +364,12 @@ async fn test_s3_put_with_update() {
 #[tokio::test]
 async fn test_azure_put_with_update() {
     let (_azurite, inner) = start_azurite().await;
+    do_put_with_update(inner).await;
+}
+
+#[tokio::test]
+async fn test_gcs_put_with_update() {
+    let (_server, inner) = start_fake_gcs_server().await;
     do_put_with_update(inner).await;
 }
 
@@ -342,5 +408,11 @@ async fn test_s3_delete() {
 #[tokio::test]
 async fn test_azure_delete() {
     let (_azurite, inner) = start_azurite().await;
+    do_delete(inner).await;
+}
+
+#[tokio::test]
+async fn test_gcs_delete() {
+    let (_server, inner) = start_fake_gcs_server().await;
     do_delete(inner).await;
 }

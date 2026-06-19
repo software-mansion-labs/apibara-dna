@@ -35,6 +35,19 @@ pub struct GcsClient {
 }
 
 impl GcsClient {
+    pub(crate) fn from_clients(
+        storage: Storage,
+        control: StorageControl,
+        project_id: Option<String>,
+    ) -> Self {
+        Self {
+            storage,
+            control,
+            project_id,
+            metrics: ObjectStoreMetrics::default(),
+        }
+    }
+
     pub async fn new(
         project_id: Option<String>,
         endpoint: Option<String>,
@@ -58,12 +71,7 @@ impl GcsClient {
             .change_context(ObjectStoreError::Configuration)
             .attach_printable("failed to build GCS control client")?;
 
-        Ok(Self {
-            storage,
-            control,
-            project_id,
-            metrics: ObjectStoreMetrics::default(),
-        })
+        Ok(Self::from_clients(storage, control, project_id))
     }
 
     pub fn has_bucket(&self, name: &str) -> BoxFuture<'static, Result<bool, ObjectStoreError>> {

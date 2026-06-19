@@ -767,6 +767,7 @@ dependencies = [
  "futures",
  "futures-buffered",
  "futures-util",
+ "google-cloud-auth",
  "google-cloud-gax",
  "google-cloud-storage",
  "hex",
