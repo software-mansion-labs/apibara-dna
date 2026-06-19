@@ -6,10 +6,6 @@ on:
       os:
         required: true
         type: string
-    secrets:
-      cachix-token:
-        required: true
-
 jobs:
   lint:
     name: Run linters and code checks
@@ -19,10 +15,11 @@ jobs:
       - uses: cachix/install-nix-action@v30
         with:
           nix_path: nixpkgs=channel:nixos-24.11
-      - uses: cachix/cachix-action@v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
-          name: apibara-public
-          authToken: "${{ secrets.cachix-token }}"
+          use-gha-cache: true
+          use-flakehub: false
+          diagnostic-endpoint: ""
       - run: nix flake check -L --accept-flake-config
 
   unit-test:
@@ -34,10 +31,11 @@ jobs:
       - uses: cachix/install-nix-action@v30
         with:
           nix_path: nixpkgs=channel:nixos-24.11
-      - uses: cachix/cachix-action@v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
-          name: apibara-public
-          authToken: "${{ secrets.cachix-token }}"
+          use-gha-cache: true
+          use-flakehub: false
+          diagnostic-endpoint: ""
       - run: nix build .#unit-tests -L --accept-flake-config
 
   integration-test:
@@ -51,9 +49,10 @@ jobs:
       - uses: cachix/install-nix-action@v30
         with:
           nix_path: nixpkgs=channel:nixos-24.11
-      - uses: cachix/cachix-action@v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
-          name: apibara-public
-          authToken: "${{ secrets.cachix-token }}"
+          use-gha-cache: true
+          use-flakehub: false
+          diagnostic-endpoint: ""
       - run: nix build .#integration-tests-archive -L --accept-flake-config
       - run: nix develop .#integration --accept-flake-config -c run-integration-tests

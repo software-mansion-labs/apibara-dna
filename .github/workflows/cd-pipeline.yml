@@ -29,10 +29,11 @@ jobs:
       - uses: cachix/install-nix-action@v30
         with:
           nix_path: nixpkgs=channel:nixos-24.11
-      - uses: cachix/cachix-action@v15
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
         with:
-          name: apibara-public
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          use-gha-cache: true
+          use-flakehub: false
+          diagnostic-endpoint: ""
       - id: extract
         run: nix develop .#ci --accept-flake-config -c extract-version-from-tag
 
@@ -48,6 +49,5 @@ jobs:
       patch: ${{ needs.extract-version.outputs.patch }}
       prerel: ${{ needs.extract-version.outputs.prerel }}
     secrets:
-      cachix-token: "${{ secrets.CACHIX_AUTH_TOKEN }}"
       quay-username: "${{ secrets.QUAY_USER }}"
       quay-password: "${{ secrets.QUAY_PASSWORD }}"
