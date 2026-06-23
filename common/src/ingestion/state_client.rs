@@ -3,7 +3,7 @@ use error_stack::{Result, ResultExt};
 use futures::{Stream, StreamExt};
 use tokio_util::sync::CancellationToken;
 
-use crate::object_store::ObjectETag;
+use crate::object_store::ObjectVersion;
 
 pub static INGESTION_PREFIX_KEY: &str = "ingestion/";
 pub static INGESTED_KEY: &str = "ingestion/ingested";
@@ -162,7 +162,9 @@ impl IngestionStateClient {
         Ok(())
     }
 
-    pub async fn get_ingested(&mut self) -> Result<Option<ObjectETag>, IngestionStateClientError> {
+    pub async fn get_ingested(
+        &mut self,
+    ) -> Result<Option<ObjectVersion>, IngestionStateClientError> {
         let response = self
             .kv_client
             .get(INGESTED_KEY)
@@ -174,18 +176,18 @@ impl IngestionStateClient {
             return Ok(None);
         };
 
-        let etag = String::from_utf8(kv.value().to_vec())
+        let version = String::from_utf8(kv.value().to_vec())
             .change_context(IngestionStateClientError)
-            .attach_printable("failed to decode etag")?;
+            .attach_printable("failed to decode version")?;
 
-        Ok(Some(ObjectETag(etag)))
+        Ok(Some(ObjectVersion(version)))
     }
 
     pub async fn put_ingested(
         &mut self,
-        etag: ObjectETag,
+        version: ObjectVersion,
     ) -> Result<(), IngestionStateClientError> {
-        let value = etag.0;
+        let value = version.0;
         self.kv_client
             .put_and_delete(INGESTED_KEY, value.as_bytes(), PENDING_KEY)
             .await

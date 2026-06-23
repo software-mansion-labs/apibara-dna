@@ -34,6 +34,7 @@ prost-types.workspace = true
 reqwest.workspace = true
 roaring.workspace = true
 rkyv.workspace = true
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 serde.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true

@@ -9,8 +9,8 @@ use tracing::debug;
 use crate::object_store::ObjectStoreResultExt;
 
 use super::{
-    error::ToObjectStoreResult, metrics::ObjectStoreMetrics, DeleteOptions, GetOptions, ObjectETag,
-    ObjectStoreError, PutMode, PutOptions,
+    error::ToObjectStoreResult, metrics::ObjectStoreMetrics, DeleteOptions, GetOptions,
+    ObjectStoreError, ObjectVersion, PutMode, PutOptions,
 };
 
 #[derive(Clone)]
@@ -66,12 +66,12 @@ impl AzureBlobClient {
         bucket: &str,
         key: &str,
         options: GetOptions,
-    ) -> Result<(ObjectETag, Bytes), ObjectStoreError> {
+    ) -> Result<(ObjectVersion, Bytes), ObjectStoreError> {
         self.metrics.get.add(1, &[]);
 
         let request = self.client.clone().blob_client(bucket, key).get();
-        let request = if let Some(etag) = options.etag {
-            request.if_match(IfMatchCondition::Match(etag.0))
+        let request = if let Some(version) = options.version {
+            request.if_match(IfMatchCondition::Match(version.0))
         } else {
             request
         };
@@ -79,12 +79,13 @@ impl AzureBlobClient {
         let mut stream = request.into_stream();
 
         let mut output = BytesMut::new();
-        let mut etag = None;
+        let mut version = None;
 
         while let Some(mut response) = stream.try_next().await.change_to_object_store_context()? {
-            if etag.is_none() {
+            if version.is_none() {
+                // Azure's blob ETag is the version token we expose.
                 let content = response.blob.properties.etag.as_ref().to_string();
-                etag = Some(ObjectETag(content));
+                version = Some(ObjectVersion(content));
             }
 
             while let Some(data) = response
@@ -97,11 +98,11 @@ impl AzureBlobClient {
             }
         }
 
-        let etag = etag
+        let version = version
             .ok_or(ObjectStoreError::Metadata)
-            .attach_printable("missing etag")?;
+            .attach_printable("missing version token")?;
 
-        Ok((etag, output.freeze()))
+        Ok((version, output.freeze()))
     }
 
     pub async fn put_object(
@@ -110,7 +111,7 @@ impl AzureBlobClient {
         key: &str,
         body: Bytes,
         options: PutOptions,
-    ) -> Result<ObjectETag, ObjectStoreError> {
+    ) -> Result<ObjectVersion, ObjectStoreError> {
         self.metrics.put.add(1, &[]);
 
         let request = self
@@ -121,7 +122,7 @@ impl AzureBlobClient {
         let request = match options.mode {
             PutMode::Overwrite => request,
             PutMode::Create => request.if_match(IfMatchCondition::NotMatch("*".to_string())),
-            PutMode::Update(etag) => request.if_match(IfMatchCondition::Match(etag.0)),
+            PutMode::Update(version) => request.if_match(IfMatchCondition::Match(version.0)),
         };
         let response = request
             .into_future()

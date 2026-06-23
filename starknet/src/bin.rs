@@ -11,6 +11,13 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<(), StarknetError> {
+    // Both `aws-lc-rs` (via aws-sdk-s3) and `ring` (via the GCS SDK) are linked,
+    // so rustls 0.23 cannot pick a process-level CryptoProvider on its own and
+    // panics the first time a TLS client is built. Select one explicitly.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
+
     let args = Cli::parse();
     run_with_args(args).await
 }

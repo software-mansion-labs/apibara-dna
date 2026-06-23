@@ -7,7 +7,7 @@ use crate::{
     chain::PendingBlockInfo,
     file_cache::{FileCache, FileFetch},
     fragment,
-    object_store::{DeleteOptions, GetOptions, ObjectETag, ObjectStore, PutOptions},
+    object_store::{DeleteOptions, GetOptions, ObjectStore, ObjectVersion, PutOptions},
     segment::{SegmentGroup, SerializedSegment},
     Cursor,
 };
@@ -285,7 +285,7 @@ impl BlockStoreWriter {
         &self,
         cursor: &Cursor,
         block: &fragment::Block,
-    ) -> Result<(usize, ObjectETag), BlockStoreError> {
+    ) -> Result<(usize, ObjectVersion), BlockStoreError> {
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(block)
             .change_context(BlockStoreError)
             .attach_printable("failed to serialize block")?;
@@ -301,7 +301,7 @@ impl BlockStoreWriter {
             .attach_printable("failed to put block")
             .attach_printable_lazy(|| format!("cursor: {}", cursor))?;
 
-        Ok((size, response.etag))
+        Ok((size, response.version))
     }
 
     #[tracing::instrument(name = "put_pending_block", skip(self, block), err(Debug))]
@@ -309,7 +309,7 @@ impl BlockStoreWriter {
         &self,
         block_info: &PendingBlockInfo,
         block: &fragment::Block,
-    ) -> Result<(usize, ObjectETag), BlockStoreError> {
+    ) -> Result<(usize, ObjectVersion), BlockStoreError> {
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(block)
             .change_context(BlockStoreError)
             .attach_printable("failed to serialize pending block")?;
@@ -329,7 +329,7 @@ impl BlockStoreWriter {
             .attach_printable("failed to put pending block")
             .attach_printable_lazy(|| format!("info: {:?}", block_info))?;
 
-        Ok((size, response.etag))
+        Ok((size, response.version))
     }
 
     pub async fn delete_block_with_prefix(&self, block_number: u64) -> Result<(), BlockStoreError> {
@@ -364,7 +364,7 @@ impl BlockStoreWriter {
         &self,
         first_cursor: &Cursor,
         segment: SerializedSegment,
-    ) -> Result<ObjectETag, BlockStoreError> {
+    ) -> Result<ObjectVersion, BlockStoreError> {
         let response = self
             .client
             .put(
@@ -378,7 +378,7 @@ impl BlockStoreWriter {
             .attach_printable_lazy(|| format!("cursor: {}", first_cursor))
             .attach_printable_lazy(|| format!("segment name: {}", segment.name))?;
 
-        Ok(response.etag)
+        Ok(response.version)
     }
 
     #[tracing::instrument(name = "put_group", skip(self, group), err(Debug))]
@@ -386,7 +386,7 @@ impl BlockStoreWriter {
         &self,
         first_cursor: &Cursor,
         group: &SegmentGroup,
-    ) -> Result<(usize, ObjectETag), BlockStoreError> {
+    ) -> Result<(usize, ObjectVersion), BlockStoreError> {
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(group)
             .change_context(BlockStoreError)
             .attach_printable("failed to serialize segment group")?;
@@ -406,7 +406,7 @@ impl BlockStoreWriter {
             .attach_printable("failed to put segment group")
             .attach_printable_lazy(|| format!("cursor: {}", first_cursor))?;
 
-        Ok((size, response.etag))
+        Ok((size, response.version))
     }
 }
 

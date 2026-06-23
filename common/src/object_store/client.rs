@@ -2,14 +2,15 @@ use bytes::Bytes;
 use error_stack::Result;
 
 use super::{
-    azure_blob::AzureBlobClient, AwsS3Client, DeleteOptions, GetOptions, ObjectETag,
-    ObjectStoreError, PutOptions,
+    azure_blob::AzureBlobClient, gcs::GcsClient, AwsS3Client, DeleteOptions, GetOptions,
+    ObjectStoreError, ObjectVersion, PutOptions,
 };
 
 #[derive(Clone)]
 pub enum ObjectStoreClient {
     AwsS3(AwsS3Client),
     AzureBlob(Box<AzureBlobClient>),
+    Gcs(Box<GcsClient>),
 }
 
 impl ObjectStoreClient {
@@ -17,6 +18,7 @@ impl ObjectStoreClient {
         match self {
             Self::AwsS3(client) => client.has_bucket(name).await,
             Self::AzureBlob(client) => client.has_bucket(name).await,
+            Self::Gcs(client) => client.has_bucket(name).await,
         }
     }
 
@@ -24,6 +26,7 @@ impl ObjectStoreClient {
         match self {
             Self::AwsS3(client) => client.create_bucket(name).await,
             Self::AzureBlob(client) => client.create_bucket(name).await,
+            Self::Gcs(client) => client.create_bucket(name).await,
         }
     }
 
@@ -32,10 +35,11 @@ impl ObjectStoreClient {
         bucket: &str,
         key: &str,
         options: GetOptions,
-    ) -> Result<(ObjectETag, Bytes), ObjectStoreError> {
+    ) -> Result<(ObjectVersion, Bytes), ObjectStoreError> {
         match self {
             Self::AwsS3(client) => client.get_object(bucket, key, options).await,
             Self::AzureBlob(client) => client.get_object(bucket, key, options).await,
+            Self::Gcs(client) => client.get_object(bucket, key, options).await,
         }
     }
 
@@ -45,10 +49,11 @@ impl ObjectStoreClient {
         key: &str,
         body: Bytes,
         options: PutOptions,
-    ) -> Result<ObjectETag, ObjectStoreError> {
+    ) -> Result<ObjectVersion, ObjectStoreError> {
         match self {
             Self::AwsS3(client) => client.put_object(bucket, key, body, options).await,
             Self::AzureBlob(client) => client.put_object(bucket, key, body, options).await,
+            Self::Gcs(client) => client.put_object(bucket, key, body, options).await,
         }
     }
 
@@ -60,6 +65,7 @@ impl ObjectStoreClient {
         match self {
             Self::AwsS3(client) => client.list_objects(bucket, prefix).await,
             Self::AzureBlob(client) => client.list_objects(bucket, prefix).await,
+            Self::Gcs(client) => client.list_objects(bucket, prefix).await,
         }
     }
 
@@ -72,6 +78,7 @@ impl ObjectStoreClient {
         match self {
             Self::AwsS3(client) => client.delete_object(bucket, key, _options).await,
             Self::AzureBlob(client) => client.delete_object(bucket, key, _options).await,
+            Self::Gcs(client) => client.delete_object(bucket, key, _options).await,
         }
     }
 }
@@ -85,5 +92,11 @@ impl From<AwsS3Client> for ObjectStoreClient {
 impl From<AzureBlobClient> for ObjectStoreClient {
     fn from(client: AzureBlobClient) -> Self {
         Self::AzureBlob(client.into())
+    }
+}
+
+impl From<GcsClient> for ObjectStoreClient {
+    fn from(client: GcsClient) -> Self {
+        Self::Gcs(client.into())
     }
 }
