@@ -80,10 +80,4 @@
       }
     );
 
-  nixConfig = {
-    extra-substituters = [ "https://apibara-public.cachix.org" ];
-    extra-trusted-public-keys = [
-      "apibara-public.cachix.org-1:FLOMNlARo9CcxtcLDblZlt2xhsu/pa/EddEH1cM3Vog="
-    ];
-  };
 }
