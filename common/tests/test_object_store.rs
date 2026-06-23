@@ -175,6 +175,15 @@ async fn test_azure_get_with_etag() {
 }
 
 #[tokio::test]
+// fake-gcs-server ignores the `ifGenerationMatch` query parameter on object
+// downloads, so it returns the object instead of the 412 returned by real GCS.
+#[ignore = "fake-gcs-server does not enforce generation preconditions on downloads"]
+async fn test_gcs_get_with_generation() {
+    let (_server, client) = start_fake_gcs_server().await;
+    do_test_get_with_version(client).await;
+}
+
+#[tokio::test]
 async fn test_gcs_get_rejects_invalid_generation() {
     let (_server, client) = start_fake_gcs_server().await;
     let client = ObjectStore::new(
