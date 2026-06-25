@@ -14,6 +14,7 @@ use crate::{
 
 static CANONICAL_PREFIX: &str = "canon";
 static RECENT_CHAIN_SEGMENT_PREFIX: &str = "recent";
+static LEGACY_RECENT_CHAIN_SEGMENT_NAME: &str = "recent";
 static RECENT_SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +108,13 @@ impl ChainStore {
         }
 
         Ok(Some(segment))
+    }
+
+    pub(crate) async fn get_legacy_recent(
+        &self,
+    ) -> Result<Option<CanonicalChainSegment>, ChainStoreError> {
+        self.get_impl(LEGACY_RECENT_CHAIN_SEGMENT_NAME, None, true)
+            .await
     }
 
     async fn put_impl(
