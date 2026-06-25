@@ -837,13 +837,38 @@ where
             .await
             .change_context(IngestionError::StateClientRequest)?
         {
-            Some(pointer) => self
-                .chain_store
-                .get_recent_snapshot(&pointer)
-                .await
-                .change_context(IngestionError::CanonicalChainStoreRequest)
-                .attach_printable("failed to get recent canonical chain snapshot")?,
-            None => None,
+            Some(pointer) => {
+                let segment = self
+                    .chain_store
+                    .get_recent_snapshot(&pointer)
+                    .await
+                    .change_context(IngestionError::CanonicalChainStoreRequest)
+                    .attach_printable("failed to get recent canonical chain snapshot")?
+                    .ok_or(IngestionError::CanonicalChainStoreRequest)
+                    .attach_printable("recent canonical chain snapshot not found")
+                    .attach_printable_lazy(|| format!("key: {}", pointer.key))?;
+                Some(segment)
+            }
+            None => {
+                let legacy_segment = self
+                    .chain_store
+                    .get_legacy_recent()
+                    .await
+                    .change_context(IngestionError::CanonicalChainStoreRequest)
+                    .attach_printable("failed to get legacy recent canonical chain segment")?;
+
+                if let Some(segment) = legacy_segment {
+                    info!(
+                        first_block = %segment.info.first_block,
+                        last_block = %segment.info.last_block,
+                        "migrating legacy recent canonical chain segment"
+                    );
+                    self.publish_recent_segment(&segment).await?;
+                    Some(segment)
+                } else {
+                    None
+                }
+            }
         };
 
         if let Some(existing_chain_segment) = existing_chain_segment {
