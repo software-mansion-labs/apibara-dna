@@ -7,6 +7,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::{
+    chain::CanonicalChainSegment,
     chain_store::ChainStore,
     file_cache::FileCache,
     ingestion::{IngestionStateClient, IngestionStateUpdate},
@@ -37,9 +38,37 @@ impl ChainViewSyncService {
         }
     }
 
+    /// Backwards-compatibility read for the legacy single-object recent layout.
+    ///
+    /// Returns the `canon/recent` segment when the legacy `ingestion/ingested` key is
+    /// still present (i.e. an ingester that predates the pointer layout). Returns `None`
+    /// once the ingester has migrated to the pointer-based layout.
+    async fn load_legacy_recent(
+        &self,
+        state_client: &mut IngestionStateClient,
+    ) -> Result<Option<CanonicalChainSegment>, ChainViewError> {
+        if state_client
+            .get_legacy_ingested()
+            .await
+            .change_context(ChainViewError)?
+            .is_none()
+        {
+            return Ok(None);
+        }
+
+        self.chain_store
+            .get_legacy_recent()
+            .await
+            .change_context(ChainViewError)
+            .attach_printable("failed to get legacy recent canonical chain segment")
+    }
+
     pub async fn start(self, ct: CancellationToken) -> Result<(), ChainViewError> {
         info!("chain_view: starting chain view sync service");
         let mut ingestion_state_client = IngestionStateClient::new(&self.etcd_client);
+        // A second client used for recovery reads while `ingestion_state_client` is tied up
+        // by the watch stream.
+        let mut recovery_state_client = IngestionStateClient::new(&self.etcd_client);
 
         let starting_block = loop {
             if ct.is_cancelled() {
@@ -93,18 +122,42 @@ impl ChainViewSyncService {
             .await
             .change_context(ChainViewError)?;
 
-        loop {
+        let recent = loop {
             if ct.is_cancelled() {
                 return Ok(());
             }
 
-            let recent = ingestion_state_client
-                .get_ingested()
+            if let Some(pointer) = ingestion_state_client
+                .get_recent()
                 .await
-                .change_context(ChainViewError)?;
+                .change_context(ChainViewError)?
+            {
+                if let Some(recent) = self
+                    .chain_store
+                    .get_recent_snapshot(&pointer)
+                    .await
+                    .change_context(ChainViewError)
+                    .attach_printable("failed to get recent canonical chain snapshot")?
+                {
+                    break recent;
+                }
 
-            if recent.is_some() {
-                break;
+                // The pointer references an object that no longer exists. It is likely
+                // stale (superseded then reclaimed by cleanup); retry to pick up the
+                // pointer the ingester publishes next, rather than failing to start.
+                warn!(
+                    key = %pointer.key,
+                    "chain_view: recent snapshot pointer references a missing object; retrying"
+                );
+            } else if let Some(recent) =
+                self.load_legacy_recent(&mut ingestion_state_client).await?
+            {
+                // Backwards compatibility: an ingester that predates the pointer layout
+                // only publishes the legacy `ingestion/ingested` key + `canon/recent`
+                // object. Deploy consumers before ingesters so this path is available
+                // during the transition.
+                warn!("chain_view: using legacy recent canonical chain segment");
+                break recent;
             }
 
             info!(
@@ -112,7 +165,7 @@ impl ChainViewSyncService {
                 "chain_view: waiting for ingestion to start"
             );
             tokio::time::sleep(Duration::from_secs(10)).await;
-        }
+        };
 
         if ct.is_cancelled() {
             return Ok(());
@@ -131,6 +184,7 @@ impl ChainViewSyncService {
             self.chain_store.clone(),
             starting_block,
             chain_segment_size,
+            recent,
         )
         .await?;
 
@@ -210,8 +264,50 @@ impl ChainViewSyncService {
                         IngestionStateUpdate::Pending(generation) => {
                             chain_view.set_pending_generation(generation).await;
                         }
-                        IngestionStateUpdate::Ingested(_etag) => {
-                            chain_view.refresh_recent().await?;
+                        IngestionStateUpdate::Recent(pointer) => {
+                            let recent = match self
+                                .chain_store
+                                .get_recent_snapshot(&pointer)
+                                .await
+                                .change_context(ChainViewError)
+                                .attach_printable("failed to get recent canonical chain snapshot")?
+                            {
+                                Some(recent) => Some(recent),
+                                None => {
+                                    // This pointer is likely stale: a newer snapshot has
+                                    // superseded it and the old object was already reclaimed
+                                    // by the cleanup job. Re-read the current pointer and use
+                                    // that instead of tearing down the watch stream.
+                                    warn!(
+                                        key = %pointer.key,
+                                        "chain_view: recent snapshot missing; re-reading current pointer"
+                                    );
+                                    match recovery_state_client
+                                        .get_recent()
+                                        .await
+                                        .change_context(ChainViewError)?
+                                    {
+                                        Some(current) if current.key != pointer.key => self
+                                            .chain_store
+                                            .get_recent_snapshot(&current)
+                                            .await
+                                            .change_context(ChainViewError)
+                                            .attach_printable(
+                                                "failed to get recent canonical chain snapshot",
+                                            )?,
+                                        _ => None,
+                                    }
+                                }
+                            };
+
+                            let Some(recent) = recent else {
+                                warn!(
+                                    key = %pointer.key,
+                                    "chain_view: skipping recent update; snapshot unavailable"
+                                );
+                                continue;
+                            };
+                            chain_view.set_recent(recent).await?;
                         }
                     }
 
