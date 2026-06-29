@@ -7,6 +7,10 @@ use crate::chain_store::RecentSegmentPointer;
 
 pub static INGESTION_PREFIX_KEY: &str = "ingestion/";
 pub static RECENT_KEY: &str = "ingestion/recent";
+// Legacy key written by ingesters that predate the pointer-based recent layout. It held
+// the object version of the single mutable `canon/recent` object. Kept only so the new
+// code can read it (consumer fallback) and clean it up after migration.
+pub static LEGACY_INGESTED_KEY: &str = "ingestion/ingested";
 pub static PENDING_KEY: &str = "ingestion/pending";
 pub static STARTING_BLOCK_KEY: &str = "ingestion/starting_block";
 pub static FINALIZED_KEY: &str = "ingestion/finalized";
@@ -208,6 +212,44 @@ impl IngestionStateClient {
             .await
             .change_context(IngestionStateClientError)
             .attach_printable("failed to put recent canonical chain segment")?;
+
+        Ok(())
+    }
+
+    /// Read the legacy `ingestion/ingested` key, returning its raw value if present.
+    ///
+    /// Used as a backwards-compatibility fallback when the new `ingestion/recent` pointer
+    /// is not yet published (e.g. a consumer running against an ingester that has not been
+    /// upgraded). Presence is what matters; the value is the legacy object version.
+    pub async fn get_legacy_ingested(
+        &mut self,
+    ) -> Result<Option<String>, IngestionStateClientError> {
+        let response = self
+            .kv_client
+            .get(LEGACY_INGESTED_KEY)
+            .await
+            .change_context(IngestionStateClientError)
+            .attach_printable("failed to get legacy ingested key")?;
+
+        let Some(kv) = response.kvs().first() else {
+            return Ok(None);
+        };
+
+        let value = String::from_utf8(kv.value().to_vec())
+            .change_context(IngestionStateClientError)
+            .attach_printable("failed to decode legacy ingested value")?;
+
+        Ok(Some(value))
+    }
+
+    /// Delete the legacy `ingestion/ingested` key. Idempotent: deleting a missing key is a
+    /// no-op in etcd.
+    pub async fn delete_legacy_ingested(&mut self) -> Result<(), IngestionStateClientError> {
+        self.kv_client
+            .delete(LEGACY_INGESTED_KEY)
+            .await
+            .change_context(IngestionStateClientError)
+            .attach_printable("failed to delete legacy ingested key")?;
 
         Ok(())
     }

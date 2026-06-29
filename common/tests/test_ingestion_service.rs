@@ -19,7 +19,7 @@ use apibara_dna_common::{
     },
     object_store::{
         testing::{minio_container, MinIO, MinIOExt},
-        AwsS3Client, DeleteOptions, ObjectStore, ObjectStoreOptions, PutOptions,
+        AwsS3Client, GetOptions, ObjectStore, ObjectStoreOptions, PutOptions,
     },
     Cursor, Hash,
 };
@@ -209,6 +209,13 @@ async fn test_ingestion_migrates_legacy_recent_segment_once() {
         .await
         .unwrap();
 
+    // Seed the legacy etcd pointer key, as a pre-pointer ingester would have written it.
+    etcd_client
+        .kv_client()
+        .put("ingestion/ingested", b"legacy-version")
+        .await
+        .unwrap();
+
     let block_ingestion = TestBlockIngestion {
         provider: anvil_provider.clone(),
     };
@@ -229,11 +236,14 @@ async fn test_ingestion_migrates_legacy_recent_segment_once() {
     assert_eq!(pointer.last_block, 0);
     assert!(pointer.key.starts_with("canon/recent/"));
 
-    object_store
-        .delete("canon/recent", DeleteOptions::default())
+    // Migration removes the legacy `canon/recent` object and the `ingestion/ingested` key.
+    assert!(object_store
+        .get("canon/recent", GetOptions::default())
         .await
-        .unwrap();
+        .is_err());
+    assert!(state_client.get_legacy_ingested().await.unwrap().is_none());
 
+    // Restart restores from the new pointer, not the (now-removed) legacy object.
     let mut restarted_service = IngestionService::new(
         block_ingestion,
         etcd_client,

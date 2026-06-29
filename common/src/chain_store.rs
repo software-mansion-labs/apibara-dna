@@ -8,7 +8,8 @@ use crate::{
     chain::CanonicalChainSegment,
     file_cache::{FileCache, FileCacheError},
     object_store::{
-        GetOptions, ObjectStore, ObjectStoreResultExt, ObjectVersion, PutMode, PutOptions,
+        DeleteOptions, GetOptions, ObjectStore, ObjectStoreResultExt, ObjectVersion, PutMode,
+        PutOptions,
     },
 };
 
@@ -115,6 +116,23 @@ impl ChainStore {
     ) -> Result<Option<CanonicalChainSegment>, ChainStoreError> {
         self.get_impl(LEGACY_RECENT_CHAIN_SEGMENT_NAME, None, true)
             .await
+    }
+
+    /// Delete the single, mutable legacy recent object (`canon/recent`).
+    ///
+    /// Used once after migrating to the pointer-based layout. Object-store deletes are
+    /// idempotent, so calling this when the object is already gone is harmless.
+    pub(crate) async fn delete_legacy_recent(&self) -> Result<(), ChainStoreError> {
+        self.client
+            .delete(
+                &self.format_key(LEGACY_RECENT_CHAIN_SEGMENT_NAME),
+                DeleteOptions::default(),
+            )
+            .await
+            .change_context(ChainStoreError)
+            .attach_printable("failed to delete legacy recent canonical chain segment")?;
+
+        Ok(())
     }
 
     async fn put_impl(
