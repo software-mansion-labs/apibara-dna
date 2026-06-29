@@ -1,7 +1,7 @@
 use error_stack::{Result, ResultExt};
 
+pub use etcd_client::{DeleteResponse, GetResponse, PutResponse};
 use etcd_client::{GetOptions, TxnResponse};
-pub use etcd_client::{GetResponse, PutResponse};
 
 use crate::client::EtcdClientError;
 
@@ -51,6 +51,20 @@ impl KvClient {
             .await
             .change_context(EtcdClientError)
             .attach_printable("failed to put key to etcd")
+            .attach_printable_lazy(|| format!("key: {}", key))
+    }
+
+    #[tracing::instrument(level = "debug", skip_all, fields(key = key.as_ref()))]
+    pub async fn delete(
+        &mut self,
+        key: impl AsRef<str>,
+    ) -> Result<DeleteResponse, EtcdClientError> {
+        let key = key.as_ref();
+        self.client
+            .delete(self.format_key(key), None)
+            .await
+            .change_context(EtcdClientError)
+            .attach_printable("failed to delete key from etcd")
             .attach_printable_lazy(|| format!("key: {}", key))
     }
 

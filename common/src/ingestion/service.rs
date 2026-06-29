@@ -830,45 +830,74 @@ where
             .change_context(IngestionError::StateClientRequest)
     }
 
+    /// Migrate the legacy single-object recent segment (`canon/recent` + the
+    /// `ingestion/ingested` key) to the pointer-based layout, returning the migrated
+    /// segment if one existed.
+    ///
+    /// After republishing under the new layout, the legacy object and key are removed.
+    /// Cleanup is best-effort: a failure only leaves harmless stale state behind, so it
+    /// must not abort startup. Deploy consumers (which read both layouts) before the
+    /// ingester so no running consumer depends on the legacy state when it is removed.
+    async fn migrate_legacy_recent_segment(
+        &mut self,
+    ) -> Result<Option<CanonicalChainSegment>, IngestionError> {
+        let legacy_segment = self
+            .chain_store
+            .get_legacy_recent()
+            .await
+            .change_context(IngestionError::CanonicalChainStoreRequest)
+            .attach_printable("failed to get legacy recent canonical chain segment")?;
+
+        let Some(segment) = legacy_segment else {
+            return Ok(None);
+        };
+
+        info!(
+            first_block = %segment.info.first_block,
+            last_block = %segment.info.last_block,
+            "migrating legacy recent canonical chain segment"
+        );
+        self.publish_recent_segment(&segment).await?;
+
+        if let Err(err) = self.chain_store.delete_legacy_recent().await {
+            warn!(error = ?err, "failed to delete legacy recent object after migration");
+        }
+        if let Err(err) = self.state_client.delete_legacy_ingested().await {
+            warn!(error = ?err, "failed to delete legacy ingested key after migration");
+        }
+
+        Ok(Some(segment))
+    }
+
     async fn get_starting_cursor(&mut self) -> Result<IngestionStartAction, IngestionError> {
-        let existing_chain_segment = match self
+        let recent_segment = match self
             .state_client
             .get_recent()
             .await
             .change_context(IngestionError::StateClientRequest)?
         {
-            Some(pointer) => {
-                let segment = self
-                    .chain_store
-                    .get_recent_snapshot(&pointer)
-                    .await
-                    .change_context(IngestionError::CanonicalChainStoreRequest)
-                    .attach_printable("failed to get recent canonical chain snapshot")?
-                    .ok_or(IngestionError::CanonicalChainStoreRequest)
-                    .attach_printable("recent canonical chain snapshot not found")
-                    .attach_printable_lazy(|| format!("key: {}", pointer.key))?;
-                Some(segment)
-            }
-            None => {
-                let legacy_segment = self
-                    .chain_store
-                    .get_legacy_recent()
-                    .await
-                    .change_context(IngestionError::CanonicalChainStoreRequest)
-                    .attach_printable("failed to get legacy recent canonical chain segment")?;
-
-                if let Some(segment) = legacy_segment {
-                    info!(
-                        first_block = %segment.info.first_block,
-                        last_block = %segment.info.last_block,
-                        "migrating legacy recent canonical chain segment"
+            Some(pointer) => self
+                .chain_store
+                .get_recent_snapshot(&pointer)
+                .await
+                .change_context(IngestionError::CanonicalChainStoreRequest)
+                .attach_printable("failed to get recent canonical chain snapshot")?
+                .or_else(|| {
+                    // The pointer references an object that no longer exists (for example it
+                    // was reclaimed by the recent-segment cleanup job). Don't fail startup:
+                    // fall back to the legacy segment, or a fresh start, below.
+                    warn!(
+                        key = %pointer.key,
+                        "recent snapshot pointer references a missing object; falling back"
                     );
-                    self.publish_recent_segment(&segment).await?;
-                    Some(segment)
-                } else {
                     None
-                }
-            }
+                }),
+            None => None,
+        };
+
+        let existing_chain_segment = match recent_segment {
+            Some(segment) => Some(segment),
+            None => self.migrate_legacy_recent_segment().await?,
         };
 
         if let Some(existing_chain_segment) = existing_chain_segment {
