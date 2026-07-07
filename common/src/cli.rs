@@ -11,7 +11,7 @@ use crate::{
     file_cache::FileCacheArgs,
     ingestion::IngestionArgs,
     object_store::{
-        AwsS3Client, AzureBlobClient, ObjectStore, ObjectStoreError, ObjectStoreOptions,
+        AwsS3Client, AzureBlobClient, GcsClient, ObjectStore, ObjectStoreError, ObjectStoreOptions,
     },
     server::ServerArgs,
 };
@@ -34,7 +34,7 @@ pub struct StartArgs {
 
 #[derive(Args, Clone, Debug)]
 pub struct ObjectStoreArgs {
-    /// The S3 backend to use. One of `s3` or `azure-blob`.
+    /// The S3 backend to use. One of `s3`, `azure-blob`, or `gcs`.
     #[arg(long = "s3.backend", env = "DNA_S3_BACKEND", default_value = "s3")]
     pub s3_backend: String,
     /// The S3 bucket to use.
@@ -81,10 +81,10 @@ pub struct EtcdArgs {
 
 impl ObjectStoreArgs {
     pub async fn into_object_store_client(self) -> Result<ObjectStore, ObjectStoreError> {
-        if self.s3_backend == "azure-blob" {
-            self.into_azure_blob_object_store_client().await
-        } else {
-            Ok(self.into_s3_object_store_client().await)
+        match self.s3_backend.as_str() {
+            "azure-blob" => self.into_azure_blob_object_store_client().await,
+            "gcs" => self.into_gcs_object_store_client().await,
+            _ => Ok(self.into_s3_object_store_client().await),
         }
     }
 
@@ -149,6 +149,21 @@ impl ObjectStoreArgs {
 
         let client = AzureBlobClient::new(location, credentials);
         Ok(ObjectStore::new_azure_blob(client, options))
+    }
+
+    pub async fn into_gcs_object_store_client(self) -> Result<ObjectStore, ObjectStoreError> {
+        // The project id is only needed to create buckets. Read it from GCP's
+        // conventional environment variable, like the Azure backend does with
+        // AZURE_STORAGE_ACCOUNT_ID.
+        let project_id = std::env::var("GOOGLE_CLOUD_PROJECT").ok();
+
+        let options = ObjectStoreOptions {
+            bucket: self.s3_bucket,
+            prefix: self.s3_prefix,
+        };
+
+        let client = GcsClient::new(project_id, self.s3_endpoint).await?;
+        Ok(ObjectStore::new_gcs(client, options))
     }
 }
 

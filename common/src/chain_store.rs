@@ -4,7 +4,7 @@ use error_stack::{Result, ResultExt};
 use crate::{
     chain::CanonicalChainSegment,
     file_cache::{FileCache, FileCacheError},
-    object_store::{GetOptions, ObjectETag, ObjectStore, ObjectStoreResultExt, PutOptions},
+    object_store::{GetOptions, ObjectStore, ObjectStoreResultExt, ObjectVersion, PutOptions},
 };
 
 static CANONICAL_PREFIX: &str = "canon";
@@ -35,7 +35,7 @@ impl ChainStore {
     pub async fn put(
         &self,
         segment: &CanonicalChainSegment,
-    ) -> Result<ObjectETag, ChainStoreError> {
+    ) -> Result<ObjectVersion, ChainStoreError> {
         let filename = self.segment_filename(segment.info.first_block.number);
         self.put_impl(&filename, segment).await
     }
@@ -43,22 +43,23 @@ impl ChainStore {
     pub async fn put_recent(
         &self,
         segment: &CanonicalChainSegment,
-    ) -> Result<ObjectETag, ChainStoreError> {
+    ) -> Result<ObjectVersion, ChainStoreError> {
         self.put_impl(RECENT_CHAIN_SEGMENT_NAME, segment).await
     }
 
     pub async fn get_recent(
         &self,
-        etag: Option<ObjectETag>,
+        version: Option<ObjectVersion>,
     ) -> Result<Option<CanonicalChainSegment>, ChainStoreError> {
-        self.get_impl(RECENT_CHAIN_SEGMENT_NAME, etag, true).await
+        self.get_impl(RECENT_CHAIN_SEGMENT_NAME, version, true)
+            .await
     }
 
     async fn put_impl(
         &self,
         name: &str,
         segment: &CanonicalChainSegment,
-    ) -> Result<ObjectETag, ChainStoreError> {
+    ) -> Result<ObjectVersion, ChainStoreError> {
         let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(segment)
             .change_context(ChainStoreError)
             .attach_printable("failed to serialize chain segment")?;
@@ -73,19 +74,19 @@ impl ChainStore {
             .attach_printable("failed to put chain segment")
             .attach_printable_lazy(|| format!("name: {}", name))?;
 
-        Ok(response.etag)
+        Ok(response.version)
     }
 
     async fn get_impl(
         &self,
         name: &str,
-        etag: Option<ObjectETag>,
+        version: Option<ObjectVersion>,
         skip_cache: bool,
     ) -> Result<Option<CanonicalChainSegment>, ChainStoreError> {
         let key = self.format_key(name);
 
         if skip_cache {
-            let Some(bytes) = self.get_as_bytes(&key, etag).await? else {
+            let Some(bytes) = self.get_as_bytes(&key, version).await? else {
                 return Ok(None);
             };
 
@@ -112,7 +113,7 @@ impl ChainStore {
 
             Ok(Some(segment))
         } else {
-            let Some(bytes) = self.get_as_bytes(&key, etag).await? else {
+            let Some(bytes) = self.get_as_bytes(&key, version).await? else {
                 return Ok(None);
             };
 
@@ -130,9 +131,9 @@ impl ChainStore {
     async fn get_as_bytes(
         &self,
         key: &str,
-        etag: Option<ObjectETag>,
+        version: Option<ObjectVersion>,
     ) -> Result<Option<Bytes>, ChainStoreError> {
-        match self.client.get(key, GetOptions { etag }).await {
+        match self.client.get(key, GetOptions { version }).await {
             Ok(response) => Ok(Some(response.body)),
             Err(err) if err.is_not_found() => Ok(None),
             Err(err) => Err(err).change_context(ChainStoreError),
