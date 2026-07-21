@@ -2,12 +2,14 @@ use std::sync::Arc;
 
 use alloy_rpc_types::BlockNumberOrTag;
 use apibara_etcd::EtcdClient;
+use bytes::Bytes;
 use error_stack::{Result, ResultExt};
 use foyer::HybridCacheBuilder;
 use testcontainers::{runners::AsyncRunner, ContainerAsync};
 
 use apibara_dna_common::{
-    chain::BlockInfo,
+    chain::{BlockInfo, CanonicalBlock, CanonicalChainSegment, CanonicalChainSegmentInfo},
+    chain_store::ChainStore,
     file_cache::FileCache,
     fragment,
     ingestion::{
@@ -17,7 +19,7 @@ use apibara_dna_common::{
     },
     object_store::{
         testing::{minio_container, MinIO, MinIOExt},
-        AwsS3Client, ObjectStore, ObjectStoreOptions,
+        AwsS3Client, GetOptions, ObjectStore, ObjectStoreOptions, PutOptions,
     },
     Cursor, Hash,
 };
@@ -123,9 +125,9 @@ async fn test_ingestion_initialize() {
     assert!(finalized.is_some());
     assert_eq!(ingest_state.finalized.number, finalized.unwrap());
 
-    // Ingested is updated only after a chain segment is uploaded.
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
+    let recent = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(recent.last_block, 0);
+    assert!(recent.key.starts_with("canon/recent/"));
 }
 
 #[tokio::test]
@@ -171,9 +173,87 @@ async fn test_ingestion_initialize_with_starting_block() {
     assert!(finalized.is_some());
     assert_eq!(ingest_state.finalized.number, finalized.unwrap());
 
-    // Ingested is updated only after a chain segment is uploaded.
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
+    let recent = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(recent.last_block, 100);
+    assert!(recent.key.starts_with("canon/recent/"));
+}
+
+#[tokio::test]
+async fn test_ingestion_migrates_legacy_recent_segment_once() {
+    let (_minio, object_store) = init_minio().await;
+    let (_etcd_server, etcd_client) = init_etcd_server().await;
+    let (_anvil_server, anvil_provider) = init_anvil().await;
+
+    let genesis = anvil_provider.get_header(BlockNumberOrTag::Number(0)).await;
+    let genesis_hash = Hash(genesis.hash.to_vec());
+    let genesis_cursor = Cursor::new(0, genesis_hash.clone());
+    let legacy_segment = CanonicalChainSegment {
+        previous_segment: None,
+        info: CanonicalChainSegmentInfo {
+            first_block: genesis_cursor.clone(),
+            last_block: genesis_cursor,
+        },
+        canonical: vec![CanonicalBlock {
+            hash: genesis_hash,
+            reorgs: Default::default(),
+        }],
+        extra_reorgs: Vec::new(),
+    };
+    let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(&legacy_segment).unwrap();
+    object_store
+        .put(
+            "canon/recent",
+            Bytes::copy_from_slice(serialized.as_slice()),
+            PutOptions::default(),
+        )
+        .await
+        .unwrap();
+
+    // Seed the legacy etcd pointer key, as a pre-pointer ingester would have written it.
+    etcd_client
+        .kv_client()
+        .put("ingestion/ingested", b"legacy-version")
+        .await
+        .unwrap();
+
+    let block_ingestion = TestBlockIngestion {
+        provider: anvil_provider.clone(),
+    };
+    let mut service = IngestionService::new(
+        block_ingestion.clone(),
+        etcd_client.clone(),
+        object_store.clone(),
+        init_file_cache().await,
+        IngestionServiceOptions::default(),
+        IngestionMetrics::default(),
+    );
+
+    service.initialize().await.unwrap();
+
+    let mut state_client = IngestionStateClient::new(&etcd_client);
+    let pointer = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(pointer.first_block, 0);
+    assert_eq!(pointer.last_block, 0);
+    assert!(pointer.key.starts_with("canon/recent/"));
+
+    // Migration removes the legacy `canon/recent` object and the `ingestion/ingested` key.
+    assert!(object_store
+        .get("canon/recent", GetOptions::default())
+        .await
+        .is_err());
+    assert!(state_client.get_legacy_ingested().await.unwrap().is_none());
+
+    // Restart restores from the new pointer, not the (now-removed) legacy object.
+    let mut restarted_service = IngestionService::new(
+        block_ingestion,
+        etcd_client,
+        object_store,
+        init_file_cache().await,
+        IngestionServiceOptions::default(),
+        IngestionMetrics::default(),
+    );
+
+    restarted_service.initialize().await.unwrap();
 }
 
 #[tokio::test]
@@ -199,7 +279,7 @@ async fn test_ingestion_advances_as_head_changes() {
     let mut service = IngestionService::new(
         block_ingestion,
         etcd_client,
-        object_store,
+        object_store.clone(),
         file_cache,
         options,
         IngestionMetrics::default(),
@@ -248,10 +328,6 @@ async fn test_ingestion_advances_as_head_changes() {
         state = Some(next_state);
     }
 
-    // Not enough blocks ingested yet.
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
-
     for _ in 0..4 {
         let join_result = service.task_queue_next().await;
         let next_state = service
@@ -262,17 +338,23 @@ async fn test_ingestion_advances_as_head_changes() {
         state = Some(next_state);
     }
 
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_none());
-
     let join_result = service.task_queue_next().await;
     service
         .tick_with_task_result(state.take().unwrap(), join_result)
         .await
+        .unwrap()
+        .take_ingest()
         .unwrap();
 
-    let ingested = state_client.get_ingested().await.unwrap();
-    assert!(ingested.is_some());
+    let recent = state_client.get_recent().await.unwrap().unwrap();
+    assert_eq!(recent.last_block, 10);
+    let chain_store = ChainStore::new(object_store.clone(), init_file_cache().await);
+    let recent_segment = chain_store
+        .get_recent_snapshot(&recent)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(recent_segment.info.last_block.number, 10);
 }
 
 #[tokio::test]
