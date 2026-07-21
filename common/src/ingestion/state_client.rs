@@ -199,14 +199,14 @@ impl IngestionStateClient {
             return Ok(None);
         };
 
-        decode_recent_pointer(kv.value()).map(Some)
+        RecentSegmentPointer::try_from(kv.value()).map(Some)
     }
 
     pub async fn put_recent(
         &mut self,
         pointer: &RecentSegmentPointer,
     ) -> Result<(), IngestionStateClientError> {
-        let value = encode_recent_pointer(pointer)?;
+        let value: Vec<u8> = pointer.try_into()?;
         self.kv_client
             .put_and_delete(RECENT_KEY, value, PENDING_KEY)
             .await
@@ -390,7 +390,7 @@ impl IngestionStateUpdate {
             .attach_printable("failed to decode key")?;
 
         if key.ends_with(RECENT_KEY) {
-            return decode_recent_pointer(kv.value())
+            return RecentSegmentPointer::try_from(kv.value())
                 .map(Self::Recent)
                 .map(Some);
         }
@@ -439,18 +439,24 @@ impl IngestionStateUpdate {
     }
 }
 
-fn encode_recent_pointer(
-    pointer: &RecentSegmentPointer,
-) -> Result<Vec<u8>, IngestionStateClientError> {
-    serde_json::to_vec(pointer)
-        .change_context(IngestionStateClientError)
-        .attach_printable("failed to serialize recent canonical chain pointer")
+impl TryFrom<&RecentSegmentPointer> for Vec<u8> {
+    type Error = error_stack::Report<IngestionStateClientError>;
+
+    fn try_from(pointer: &RecentSegmentPointer) -> std::result::Result<Self, Self::Error> {
+        serde_json::to_vec(pointer)
+            .change_context(IngestionStateClientError)
+            .attach_printable("failed to serialize recent canonical chain pointer")
+    }
 }
 
-fn decode_recent_pointer(bytes: &[u8]) -> Result<RecentSegmentPointer, IngestionStateClientError> {
-    serde_json::from_slice(bytes)
-        .change_context(IngestionStateClientError)
-        .attach_printable("failed to deserialize recent canonical chain pointer")
+impl TryFrom<&[u8]> for RecentSegmentPointer {
+    type Error = error_stack::Report<IngestionStateClientError>;
+
+    fn try_from(bytes: &[u8]) -> std::result::Result<Self, Self::Error> {
+        serde_json::from_slice(bytes)
+            .change_context(IngestionStateClientError)
+            .attach_printable("failed to deserialize recent canonical chain pointer")
+    }
 }
 
 #[cfg(test)]
@@ -466,9 +472,9 @@ mod tests {
             last_block: 42,
         };
 
-        let encoded = encode_recent_pointer(&pointer).unwrap();
+        let encoded: Vec<u8> = (&pointer).try_into().unwrap();
         assert!(std::str::from_utf8(&encoded).is_ok());
-        let decoded = decode_recent_pointer(&encoded).unwrap();
+        let decoded = RecentSegmentPointer::try_from(encoded.as_slice()).unwrap();
 
         assert_eq!(decoded, pointer);
     }
