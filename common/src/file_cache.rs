@@ -222,7 +222,7 @@ impl FileCacheArgs {
                 })?
                 .as_u64();
 
-            let device = FsDeviceBuilder::new(cache_dir.join("general"))
+            let device = FsDeviceBuilder::new(cache_dir.join("index"))
                 .with_capacity(max_size_disk_bytes as usize)
                 .build()
                 .map_err(FileCacheError::Foyer)?;
