@@ -21,7 +21,7 @@ pub use self::service::{
 };
 pub use self::state_client::{
     IngestionStateClient, IngestionStateClientError, IngestionStateUpdate, FINALIZED_KEY,
-    INGESTED_KEY, INGESTION_PREFIX_KEY, STARTING_BLOCK_KEY,
+    INGESTION_PREFIX_KEY, RECENT_KEY, STARTING_BLOCK_KEY,
 };
 
 pub async fn ingestion_service_loop<I>(

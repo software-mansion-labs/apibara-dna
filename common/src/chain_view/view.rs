@@ -235,12 +235,15 @@ impl ChainView {
         inner.grouped = Some(block);
     }
 
-    pub(crate) async fn refresh_recent(&self) -> Result<(), ChainViewError> {
+    pub(crate) async fn set_recent(
+        &self,
+        recent: crate::chain::CanonicalChainSegment,
+    ) -> Result<(), ChainViewError> {
         let mut inner = self.0.write().await;
 
-        inner.canonical.refresh_recent().await?;
+        inner.canonical.set_recent(recent);
         let new_head = inner.canonical.get_head().await?;
-        debug!(?new_head, "refresh recent head");
+        debug!(?new_head, "set recent head");
 
         inner.metrics.head.record(new_head.number, &[]);
         inner.head_notify.notify_waiters();
