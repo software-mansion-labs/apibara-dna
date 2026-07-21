@@ -38,12 +38,51 @@ impl ChainViewSyncService {
         }
     }
 
+    /// Read the recent canonical chain segment currently published by the ingester.
+    ///
+    /// Returns `None` when no segment is available yet, so callers can simply retry. That
+    /// covers both an ingester that has not published anything and a pointer that has
+    /// already been reclaimed by the cleanup job.
+    async fn get_recent(
+        &self,
+        state_client: &mut IngestionStateClient,
+    ) -> Result<Option<CanonicalChainSegment>, ChainViewError> {
+        let Some(pointer) = state_client
+            .get_recent()
+            .await
+            .change_context(ChainViewError)?
+        else {
+            return self.get_legacy_recent(state_client).await;
+        };
+
+        let recent = self
+            .chain_store
+            .get_recent_snapshot(&pointer)
+            .await
+            .change_context(ChainViewError)
+            .attach_printable("failed to get recent canonical chain snapshot")?;
+
+        if recent.is_none() {
+            // The pointer references an object that no longer exists. It is likely
+            // stale (superseded then reclaimed by cleanup); the caller retries to pick
+            // up the pointer the ingester publishes next, rather than failing to start.
+            warn!(
+                key = %pointer.key,
+                "chain_view: recent snapshot pointer references a missing object; retrying"
+            );
+        }
+
+        Ok(recent)
+    }
+
     /// Backwards-compatibility read for the legacy single-object recent layout.
     ///
     /// Returns the `canon/recent` segment when the legacy `ingestion/ingested` key is
     /// still present (i.e. an ingester that predates the pointer layout). Returns `None`
     /// once the ingester has migrated to the pointer-based layout.
-    async fn load_legacy_recent(
+    ///
+    /// Deploy consumers before ingesters so this path is available during the transition.
+    async fn get_legacy_recent(
         &self,
         state_client: &mut IngestionStateClient,
     ) -> Result<Option<CanonicalChainSegment>, ChainViewError> {
@@ -56,11 +95,18 @@ impl ChainViewSyncService {
             return Ok(None);
         }
 
-        self.chain_store
+        let recent = self
+            .chain_store
             .get_legacy_recent()
             .await
             .change_context(ChainViewError)
-            .attach_printable("failed to get legacy recent canonical chain segment")
+            .attach_printable("failed to get legacy recent canonical chain segment")?;
+
+        if recent.is_some() {
+            warn!("chain_view: using legacy recent canonical chain segment");
+        }
+
+        Ok(recent)
     }
 
     pub async fn start(self, ct: CancellationToken) -> Result<(), ChainViewError> {
@@ -127,36 +173,7 @@ impl ChainViewSyncService {
                 return Ok(());
             }
 
-            if let Some(pointer) = ingestion_state_client
-                .get_recent()
-                .await
-                .change_context(ChainViewError)?
-            {
-                if let Some(recent) = self
-                    .chain_store
-                    .get_recent_snapshot(&pointer)
-                    .await
-                    .change_context(ChainViewError)
-                    .attach_printable("failed to get recent canonical chain snapshot")?
-                {
-                    break recent;
-                }
-
-                // The pointer references an object that no longer exists. It is likely
-                // stale (superseded then reclaimed by cleanup); retry to pick up the
-                // pointer the ingester publishes next, rather than failing to start.
-                warn!(
-                    key = %pointer.key,
-                    "chain_view: recent snapshot pointer references a missing object; retrying"
-                );
-            } else if let Some(recent) =
-                self.load_legacy_recent(&mut ingestion_state_client).await?
-            {
-                // Backwards compatibility: an ingester that predates the pointer layout
-                // only publishes the legacy `ingestion/ingested` key + `canon/recent`
-                // object. Deploy consumers before ingesters so this path is available
-                // during the transition.
-                warn!("chain_view: using legacy recent canonical chain segment");
+            if let Some(recent) = self.get_recent(&mut ingestion_state_client).await? {
                 break recent;
             }
 
