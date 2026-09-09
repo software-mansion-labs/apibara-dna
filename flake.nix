@@ -1,5 +1,5 @@
 {
-  description = "Apibara development environment";
+  description = "Starkstream DNA development environment";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -27,31 +27,19 @@
         };
 
         crates = {
-          dna-beaconchain = {
-            description = "The Beacon Chain DNA server";
-            path = ./beaconchain;
-            ports = {
-              "7007/tcp" = { };
-            };
-          };
-          dna-evm = {
-            description = "The EVM DNA server";
-            path = ./evm;
-            ports = {
-              "7007/tcp" = { };
-            };
-          };
           dna-starknet = {
             description = "The Starknet DNA server";
             path = ./starknet;
+            binary = "starkstream-dna-starknet";
             ports = {
               "7007/tcp" = { };
             };
           };
 
           benchmark = {
-            description = "Apibara benchmark";
+            description = "Starkstream DNA benchmark";
             path = ./benchmark;
+            binary = "starkstream-dna-benchmark";
             ports = { };
           };
         };
@@ -61,7 +49,6 @@
           workspaceDir = ./.;
         };
 
-        ci = pkgs.callPackage ./nix/ci.nix { };
       in
       {
         # format with `nix fmt`
@@ -71,7 +58,7 @@
         checks = buildArtifacts.checks;
 
         # development shells. start with `nix develop`.
-        devShells = (buildArtifacts.shell // ci.shell // { });
+        devShells = (buildArtifacts.shell // { });
 
         # all packages.
         # show them with `nix flake show`.
